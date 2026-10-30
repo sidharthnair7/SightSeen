@@ -1,0 +1,5 @@
+# The helper's own packages. PyTorch and MapAnything are installed by setup.sh first.
+fastapi
+uvicorn[standard]
+python-multipart
+opencv-python

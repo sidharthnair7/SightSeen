@@ -1,0 +1,28 @@
+# secrets and local settings
+.env
+.env.*
+!.env.example
+
+# Requests, videos and 3D rooms (local data, never committed)
+data/
+
+# Java
+target/
+
+# Python helper: its venv and the MapAnything clone
+worker/.venv/
+worker/vendor/
+__pycache__/
+*.pyc
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# editors and logs
+.idea/
+.vscode/
+*.log
+.plans/
+.claude/
+CHECKLIST.md
