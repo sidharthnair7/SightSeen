@@ -22,7 +22,7 @@ CHECKPOINTS = {
     "apache": "facebook/map-anything-apache",  # Apache 2.0, 6 training datasets: SightSeen's default
     "default": "facebook/map-anything",  # CC-BY-NC 4.0, 13 datasets: for comparison only
 }
-MAX_POINTS = 800_000  # enough to see and measure the room, small enough for a browser
+MAX_POINTS = 2_000_000  # most of a 24-frame run (up to ~3.7 million before masking); about 30 MB for the browser
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 _loaded = {"key": None, "model": None}

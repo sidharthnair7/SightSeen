@@ -9,13 +9,21 @@ const MARK = '#f59e0b'
 /**
  * The 3D room as coloured points. Drag to turn, scroll to zoom, right-drag to move.
  * A click (not a drag) on the room drops a marker; two markers give the straight-line distance between them.
+ * The dot-size slider makes the points bigger, so the room looks less see-through.
  */
 export default function RoomViewer({ url }: { url: string }) {
   const host = useRef<HTMLDivElement>(null)
   const clear = useRef<() => void>(() => {})
+  const material = useRef<THREE.PointsMaterial | null>(null)
+  const baseSize = useRef(0.01)
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [picked, setPicked] = useState(0)
   const [distance, setDistance] = useState<number | null>(null)
+  const [dots, setDots] = useState(1)
+
+  useEffect(() => {
+    if (material.current) material.current.size = baseSize.current * dots
+  }, [dots, state])
 
   useEffect(() => {
     const el = host.current
@@ -49,10 +57,10 @@ export default function RoomViewer({ url }: { url: string }) {
       if (disposed) return
       geometry.computeBoundingSphere()
       const sphere = geometry.boundingSphere!
-      cloud = new THREE.Points(geometry, new THREE.PointsMaterial({
-        size: Math.max(0.004, sphere.radius / 250),
-        vertexColors: true,
-      }))
+      // About 2 cm dots in a room-sized cloud; the slider scales this
+      baseSize.current = Math.max(0.006, sphere.radius / 120)
+      material.current = new THREE.PointsMaterial({ size: baseSize.current, vertexColors: true })
+      cloud = new THREE.Points(geometry, material.current)
       scene.add(cloud)
       // Start a step back from the middle, roughly where the video began, looking into the room
       controls.target.copy(sphere.center)
@@ -133,6 +141,8 @@ export default function RoomViewer({ url }: { url: string }) {
       renderer.domElement.removeEventListener('pointerup', onUp)
       controls.dispose()
       cloud?.geometry.dispose()
+      material.current?.dispose()
+      material.current = null
       renderer.dispose()
       el.removeChild(renderer.domElement)
     }
@@ -165,6 +175,20 @@ export default function RoomViewer({ url }: { url: string }) {
       <p className="pointer-events-none absolute bottom-3 left-3 text-xs text-white/70">
         Drag to turn, scroll to zoom, right-drag to move.
       </p>
+      {state === 'ready' && (
+        <label className="absolute bottom-3 right-3 flex items-center gap-2 rounded-lg bg-black/60 px-3 py-2 text-xs text-white">
+          Dot size
+          <input
+            type="range"
+            min={0.5}
+            max={3}
+            step={0.25}
+            value={dots}
+            onChange={e => setDots(Number(e.target.value))}
+            className="w-28 accent-amber-500"
+          />
+        </label>
+      )}
     </div>
   )
 }
