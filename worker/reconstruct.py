@@ -292,6 +292,49 @@ def _fuse(room, path):
     return len(mesh.triangles)
 
 
+def _quaternion(turn):
+    """A 3 x 3 rotation as a unit quaternion (w, x, y, z)."""
+    m = turn.astype(np.float64)
+    w = math.sqrt(max(0.0, 1.0 + m[0, 0] + m[1, 1] + m[2, 2])) / 2
+    x = math.copysign(math.sqrt(max(0.0, 1.0 + m[0, 0] - m[1, 1] - m[2, 2])) / 2, m[2, 1] - m[1, 2])
+    y = math.copysign(math.sqrt(max(0.0, 1.0 - m[0, 0] + m[1, 1] - m[2, 2])) / 2, m[0, 2] - m[2, 0])
+    z = math.copysign(math.sqrt(max(0.0, 1.0 - m[0, 0] - m[1, 1] + m[2, 2])) / 2, m[1, 0] - m[0, 1])
+    return w, x, y, z
+
+
+def _write_splat_data(room, points, colours, folder):
+    """Writes what a Gaussian splat trainer (Brush) starts from, in COLMAP's text format: every frame as MapAnything
+    saw it, each camera's lens and position, and the room's points as the starting splats. OpenCV axes throughout,
+    which is COLMAP's own convention."""
+    if folder.exists():
+        shutil.rmtree(folder)
+    (folder / "images").mkdir(parents=True)
+    sparse = folder / "sparse" / "0"
+    sparse.mkdir(parents=True)
+    cameras = ["# CAMERA_ID MODEL WIDTH HEIGHT fx fy cx cy"]
+    images = ["# IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME, then a line of 2D points (none here)"]
+    for number, (i, f) in enumerate(sorted(room.items()), start=1):
+        name = f"frame_{i:04d}.png"
+        cv2.imwrite(str(folder / "images" / name), cv2.cvtColor(f["rgb"], cv2.COLOR_RGB2BGR))
+        height, width = f["rgb"].shape[:2]
+        lens = f["lens"]
+        cameras.append(f"{number} PINHOLE {width} {height} {lens[0, 0]:.4f} {lens[1, 1]:.4f} {lens[0, 2]:.4f} {lens[1, 2]:.4f}")
+        to_camera = f["pose"][:3, :3].T.astype(np.float64)  # COLMAP stores world-to-camera
+        shift = -to_camera @ f["pose"][:3, 3].astype(np.float64)
+        qw, qx, qy, qz = _quaternion(to_camera)
+        images.append(f"{number} {qw:.8f} {qx:.8f} {qy:.8f} {qz:.8f} {shift[0]:.6f} {shift[1]:.6f} {shift[2]:.6f} {number} {name}")
+        images.append("")
+    (sparse / "cameras.txt").write_text("\n".join(cameras) + "\n")
+    (sparse / "images.txt").write_text("\n".join(images) + "\n")
+    start = np.random.default_rng(0).choice(len(points), min(len(points), 300_000), replace=False)
+    lines = ["# POINT3D_ID X Y Z R G B ERROR (no tracks)"]
+    for number, k in enumerate(start, start=1):
+        x, y, z = points[k]
+        r, g, b = colours[k]
+        lines.append(f"{number} {x:.4f} {y:.4f} {z:.4f} {r} {g} {b} 0")
+    (sparse / "points3D.txt").write_text("\n".join(lines) + "\n")
+
+
 def write_ply(path, points, colours, triangles=None):
     """Binary PLY with 32-bit floats (WebGL can't draw 64-bit ones): coloured points, and triangles for a surface."""
     count = len(points)
@@ -363,7 +406,6 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
     points = np.concatenate([f["pts"][f["valid"]] for f in room.values()])
     colours = np.concatenate([f["rgb"][f["valid"]] for f in room.values()])
     confidence = np.concatenate([f["conf"][f["valid"]] for f in room.values()])
-    room.clear()
     keep = confidence >= np.percentile(confidence, 10)  # drop the least confident tenth, as MapAnything's own mask does
     points, colours, confidence = points[keep], colours[keep], confidence[keep]
     points, colours = _thin(points, colours, confidence, DOT)
@@ -371,6 +413,8 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
         chosen = np.random.default_rng(0).choice(len(points), MAX_POINTS, replace=False)
         points, colours = points[chosen], colours[chosen]
     filled = int(len(np.unique(_cells(points, CUBE))))
+    _write_splat_data(room, points, colours, out / "splat-data")
+    room.clear()
     points = points * np.array([1.0, -1.0, -1.0], dtype=np.float32)  # OpenCV axes to three.js axes
     write_ply(out / "room.ply", points, colours)
 
