@@ -1,13 +1,19 @@
-"""Video in, 3D room out: frames from the video, MapAnything, then a coloured point cloud (room.ply) and its numbers.
+"""Video in, 3D room out: frames from the video, MapAnything, then the room as a solid surface and as coloured points.
 
-A GPU with 8 GB can only take about 24 frames in one MapAnything run, so a longer video is split into equal parts
-that each share half their frames with the part before. The shared frames line each part up with the room so far,
-the way VGGT-Long does it (arXiv 2507.16443, Section 3.1). Every join reports how well it fit.
+A GPU with 8 GB can only take about 24 frames in one MapAnything run. A longer video gets one run of 24 frames spread
+over the whole video first: that run sets the room's shape and size (the one-run version measured right). The video is
+then split into equal parts, and each part lines up with that whole-video run on the frames they share (the fit is
+VGGT-Long's, arXiv 2507.16443, Section 3.1). Lining every part up with the same run means errors can't stack up from
+part to part. Every join reports how well it fit.
+
+All the frames are then fused into one surface (TSDF fusion: each frame's depth votes into a grid of small cubes, the
+grid keeps the average, and marching cubes pulls out triangles), so the walls are solid instead of dots.
 
 Everything is written into the request's folder, next to the video:
-  frames/       the frames MapAnything saw
-  room.ply      the 3D room as coloured points, in metres, in three.js axes (x right, y up, z towards the viewer)
-  result.json   the run's numbers (the same dict run() returns)
+  frames/            the frames MapAnything saw
+  room-surface.ply   the 3D room as a coloured triangle mesh, in metres, in three.js axes (x right, y up, z towards the viewer)
+  room.ply           the same room as coloured points
+  result.json        the run's numbers (the same dict run() returns)
 """
 
 import json
@@ -15,9 +21,11 @@ import math
 import os
 import shutil
 import time
+import traceback
 from pathlib import Path
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("OPEN3D_DISABLE_WEB_VISUALIZER", "true")  # Open3D's notebook viewer; SightSeen doesn't use it
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
@@ -31,6 +39,19 @@ MAX_POINTS = 2_000_000  # about 30 MB for the browser
 MAX_TOTAL_FRAMES = 240  # 2 minutes of video at 2 frames a second; a longer video gets its frames spread out
 DOT = 0.01  # 1 cm: where several frames saw the same spot, the room keeps only the most confident point
 CUBE = 0.05  # 5 cm cubes for the "how much of the room is filled" number
+GRID = 256  # the surface's grid has at most this many cubes along each side (2 cm cubes in a room up to about 5 m)
+MAX_TRIANGLES = 800_000  # about 15 MB for the browser
+SMALLEST_PIECE = 200  # loose bits of surface with fewer triangles than this are floating noise
+INFER = dict(
+    memory_efficient_inference=True,
+    minibatch_size=1,  # smallest GPU memory use
+    use_amp=True,
+    amp_dtype="bf16",
+    apply_mask=True,
+    mask_edges=True,
+    apply_confidence_mask=False,
+    confidence_percentile=10,
+)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 _loaded = {"key": None, "model": None}
@@ -97,15 +118,14 @@ def extract_frames(video_path, frames_dir, fps, max_frames):
     return paths
 
 
-def split(count, size):
-    """Equal parts of `size` frames, spread over `count` frames so each part shares at least half its frames
-    with the part before (VGGT-Long's overlap). A video that fits in one run stays one part."""
+def plan(count, size):
+    """Which frames go in each run: the whole-video run (`size` frames spread over all `count`), then equal parts of
+    at most `size` frames each. A video that fits in one run is just that run."""
     if count <= size:
-        return [list(range(count))]
-    step = size - size // 2
-    parts = math.ceil((count - size) / step) + 1
-    starts = np.linspace(0, count - size, parts).round().astype(int)
-    return [list(range(start, start + size)) for start in starts]
+        return list(range(count)), []
+    whole = sorted(set(np.linspace(0, count - 1, size).round().astype(int).tolist()))
+    parts = [part.tolist() for part in np.array_split(np.arange(count), math.ceil(count / size))]
+    return whole, parts
 
 
 def _numpy(tensor):
@@ -113,16 +133,54 @@ def _numpy(tensor):
 
 
 def _frame(pred):
-    """One frame's points, colours and confidence, kept as whole images so two parts' copies of the same frame
-    line up pixel for pixel."""
-    pts = _numpy(pred["pts3d"][0])  # (H, W, 3): metres, this part's first camera, OpenCV axes
+    """One frame's points, colours, confidence and camera, kept as whole images so two runs' copies of the same
+    frame line up pixel for pixel."""
+    pts = _numpy(pred["pts3d"][0])  # (H, W, 3): metres, this run's first camera, OpenCV axes
     valid = _numpy(pred["mask"][0]).reshape(pts.shape[:2]) > 0.5
     conf = _numpy(pred["conf"][0]).reshape(pts.shape[:2])
     rgb = _numpy(pred["img_no_norm"][0])
     if rgb.max() > 1.5:
         rgb = rgb / 255.0
     rgb = (np.clip(rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
-    return {"pts": pts, "valid": valid, "conf": conf, "rgb": rgb}
+    depth = _numpy(pred["depth_z"][0]).reshape(pts.shape[:2])  # metres along the camera's view
+    lens = _numpy(pred["intrinsics"][0])  # 3 x 3, in pixels of this frame
+    pose = _numpy(pred["camera_poses"][0])  # 4 x 4, camera to this run's space
+    return {"pts": pts, "valid": valid, "conf": conf, "rgb": rgb, "depth": depth, "lens": lens, "pose": pose}
+
+
+def _rebuild(model, frames, indices):
+    """One MapAnything run on some of the frames. Returns {frame number: that frame}, the seconds it took and the
+    run's metric scale factor."""
+    from mapanything.utils.image import load_images
+
+    views = load_images([frames[i] for i in indices])
+    started = time.perf_counter()
+    with torch.no_grad():
+        predictions = model.infer(views, **INFER)
+    seconds = time.perf_counter() - started
+    scale_factor = float(_numpy(predictions[0]["metric_scaling_factor"]).reshape(-1)[0])
+    run = {i: _frame(pred) for i, pred in zip(indices, predictions)}
+    del predictions, views
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+
+    # VGGT-Long leaves out spots below a tenth of the run's median confidence when lining runs up
+    floor = 0.1 * float(np.median(np.concatenate([f["conf"][f["valid"]] for f in run.values()])))
+    for f in run.values():
+        f["trusted"] = f["valid"] & (f["conf"] >= floor)
+    return run, seconds, scale_factor
+
+
+def _move(run, fit):
+    """Moves a run's frames (points, cameras and depths) into the room's space."""
+    resize, turn, move = fit
+    for f in run.values():
+        f["pts"] = (resize * f["pts"] @ turn.T + move).astype(np.float32)
+        pose = np.eye(4, dtype=np.float32)
+        pose[:3, :3] = turn @ f["pose"][:3, :3]
+        pose[:3, 3] = resize * turn @ f["pose"][:3, 3] + move
+        f["pose"] = pose
+        f["depth"] = f["depth"] * resize
 
 
 def _umeyama(src, dst, weights):
@@ -153,7 +211,7 @@ def _fit(src, dst, weights, rounds=10):
 
 
 def _join(part, room, number):
-    """Lines a new part up with the room so far, using the frames both have seen. Returns the fit (or None when
+    """Lines a part up with the room (the whole-video run), using the frames both have. Returns the fit (or None when
     there's too little to line up with) and the join's numbers."""
     shared = [i for i in part if i in room]
     src, dst, weights = [], [], []
@@ -195,7 +253,47 @@ def _thin(points, colours, confidence, size):
     return points[keep], colours[keep]
 
 
-def write_ply(path, points, colours):
+def _fuse(room, path):
+    """TSDF fusion: every frame's depth votes into one grid of small cubes, the grid keeps the weighted average (so
+    frames that disagree a little blend into one wall), and marching cubes pulls the surface out as triangles.
+    Writes the coloured mesh to `path` in three.js axes and returns its number of triangles."""
+    import open3d as o3d
+
+    sample = np.concatenate([f["pts"][f["trusted"]][::50] for f in room.values()])
+    low = np.percentile(sample, 1, axis=0) - 0.15
+    high = np.percentile(sample, 99, axis=0) + 0.15
+    side = float((high - low).max())
+    cube = max(0.02, side / GRID)
+    cubes = int(math.ceil(side / cube))
+    volume = o3d.pipelines.integration.UniformTSDFVolume(
+        length=cubes * cube, resolution=cubes, sdf_trunc=4 * cube,  # walls up to 4 cubes apart blend into one
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+        origin=low.reshape(3, 1).astype(np.float64))
+    for f in room.values():
+        height, width = f["depth"].shape
+        depth = np.where(f["trusted"], f["depth"], 0.0).astype(np.float32)  # 0 = no depth here
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            o3d.geometry.Image(np.ascontiguousarray(f["rgb"])), o3d.geometry.Image(depth),
+            depth_scale=1.0, depth_trunc=2 * side, convert_rgb_to_intensity=False)
+        lens = f["lens"]
+        camera = o3d.camera.PinholeCameraIntrinsic(width, height, lens[0, 0], lens[1, 1], lens[0, 2], lens[1, 2])
+        volume.integrate(rgbd, camera, np.linalg.inv(f["pose"].astype(np.float64)))
+
+    mesh = volume.extract_triangle_mesh()
+    pieces, sizes, _ = mesh.cluster_connected_triangles()
+    mesh.remove_triangles_by_mask(np.asarray(sizes)[np.asarray(pieces)] < SMALLEST_PIECE)
+    mesh.remove_unreferenced_vertices()
+    if len(mesh.triangles) > MAX_TRIANGLES:
+        mesh = mesh.simplify_quadric_decimation(MAX_TRIANGLES)
+    flip = np.array([1.0, -1.0, -1.0])  # OpenCV axes to three.js axes (a half turn, so triangles keep their facing)
+    write_ply(path, (np.asarray(mesh.vertices) * flip).astype(np.float32),
+              (np.clip(np.asarray(mesh.vertex_colors), 0.0, 1.0) * 255.0).astype(np.uint8),
+              np.asarray(mesh.triangles).astype(np.int32))
+    return len(mesh.triangles)
+
+
+def write_ply(path, points, colours, triangles=None):
+    """Binary PLY with 32-bit floats (WebGL can't draw 64-bit ones): coloured points, and triangles for a surface."""
     count = len(points)
     data = np.empty(count, dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"),
                                   ("red", "u1"), ("green", "u1"), ("blue", "u1")])
@@ -206,11 +304,17 @@ def write_ply(path, points, colours):
         f"element vertex {count}\n"
         "property float x\nproperty float y\nproperty float z\n"
         "property uchar red\nproperty uchar green\nproperty uchar blue\n"
-        "end_header\n"
     )
+    if triangles is not None:
+        faces = np.empty(len(triangles), dtype=[("n", "u1"), ("a", "<i4"), ("b", "<i4"), ("c", "<i4")])
+        faces["n"] = 3
+        faces["a"], faces["b"], faces["c"] = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+        header += f"element face {len(triangles)}\nproperty list uchar int vertex_indices\n"
     with open(path, "wb") as f:
-        f.write(header.encode("ascii"))
+        f.write((header + "end_header\n").encode("ascii"))
         f.write(data.tobytes())
+        if triangles is not None:
+            f.write(faces.tobytes())
 
 
 def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
@@ -219,63 +323,41 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
 
     stage("taking frames from the video")
     frames = extract_frames(video_path, out / "frames", fps, MAX_TOTAL_FRAMES)
-    parts = split(len(frames), frames_per_part)
+    whole, parts = plan(len(frames), frames_per_part)
 
     first_load = _loaded["key"] != model_key
     stage("loading the 3D model" + (" (the first load takes a minute)" if first_load else ""))
     model = _model(model_key)
 
-    from mapanything.utils.image import load_images
-
     if DEVICE == "cuda":
         torch.cuda.reset_peak_memory_stats()
-    room = {}  # frame number -> that frame's points, already moved into part 1's space
-    joins, scale_factors, seconds = [], [], 0.0
+    if parts:
+        stage(f"rebuilding the whole room from {len(whole)} frames spread over the video")
+    else:
+        stage(f"rebuilding the room from {len(whole)} frames")
+    anchor, seconds, scale_factor = _rebuild(model, frames, whole)
+
+    room = dict(anchor)  # frame number -> that frame, in the whole-video run's space
+    joins = []
     for number, indices in enumerate(parts, start=1):
-        if len(parts) == 1:
-            stage(f"rebuilding the room from {len(indices)} frames")
-        else:
-            stage(f"rebuilding part {number} of {len(parts)} ({len(indices)} frames)")
-        views = load_images([frames[i] for i in indices])
-        started = time.perf_counter()
-        with torch.no_grad():
-            predictions = model.infer(
-                views,
-                memory_efficient_inference=True,
-                minibatch_size=1,  # smallest GPU memory use
-                use_amp=True,
-                amp_dtype="bf16",
-                apply_mask=True,
-                mask_edges=True,
-                apply_confidence_mask=False,
-                confidence_percentile=10,
-            )
-        seconds += time.perf_counter() - started
-        scale_factors.append(float(_numpy(predictions[0]["metric_scaling_factor"]).reshape(-1)[0]))
-        part = {i: _frame(pred) for i, pred in zip(indices, predictions)}
-        del predictions, views
-        if DEVICE == "cuda":
-            torch.cuda.empty_cache()
-
-        # VGGT-Long leaves out spots below a tenth of the part's median confidence when lining parts up
-        floor = 0.1 * float(np.median(np.concatenate([f["conf"][f["valid"]] for f in part.values()])))
-        for f in part.values():
-            f["trusted"] = f["valid"] & (f["conf"] >= floor)
-
-        if number == 1:
-            fit = (1.0, np.eye(3, dtype=np.float32), np.zeros(3, dtype=np.float32))
-        else:
-            stage(f"lining up part {number} with the room so far")
-            fit, report = _join(part, room, number)
-            joins.append(report)
-            if fit is None:
-                continue
-        resize, turn, move = fit
-        for i, f in part.items():
-            if i not in room:
-                f["pts"] = (resize * f["pts"] @ turn.T + move).astype(np.float32)
-                room[i] = f
+        stage(f"adding detail: part {number} of {len(parts)} ({len(indices)} frames)")
+        part, part_seconds, _ = _rebuild(model, frames, indices)
+        seconds += part_seconds
+        fit, report = _join(part, anchor, number)
+        joins.append(report)
+        if fit is None:
+            continue  # this stretch keeps the whole-video run's frames
+        _move(part, fit)
+        room.update(part)  # a part's own copy of a shared frame replaces the whole-video run's
     peak_gb = torch.cuda.max_memory_allocated() / 1e9 if DEVICE == "cuda" else None
+
+    stage("making the solid surface")
+    try:
+        triangles = _fuse(room, out / "room-surface.ply")
+        surface, surface_error = "room-surface.ply", None
+    except Exception as error:  # noqa: BLE001 - the dots still work, so a failed surface doesn't fail the room
+        traceback.print_exc()
+        triangles, surface, surface_error = 0, None, f"{type(error).__name__}: {error}"
 
     stage("saving the room")
     points = np.concatenate([f["pts"][f["valid"]] for f in room.values()])
@@ -299,16 +381,20 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
 
     result = {
         "frames": len(frames),
+        "wholeVideoFrames": len(whole),
         "parts": len(parts),
         "seconds": round(seconds, 1),
         "peakVramGb": round(peak_gb, 2) if peak_gb is not None else None,
-        "scaleFactor": round(scale_factors[0], 4),
+        "scaleFactor": round(scale_factor, 4),
         "points": int(len(points)),
         "filledCubes": filled,
+        "triangles": triangles,
         "sizeX": round(float(size[0]), 3),
         "sizeY": round(float(size[1]), 3),
         "sizeZ": round(float(size[2]), 3),
         "ply": "room.ply",
+        "surface": surface,
+        "surfaceError": surface_error,
         "model": model_key,
         "joins": joins,
     }

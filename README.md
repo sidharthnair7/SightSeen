@@ -12,8 +12,37 @@ Students renting from far away can't visit a place before signing. With SightSee
 ## How it fits together
 
 - `src/`: Spring Boot (Java 25). Requests, the student's and the landlord's APIs, and the jobs sent to the 3D helper. Data lives in `data/` (an H2 file, the videos and the 3D rooms).
-- `worker/`: the 3D helper (Python, FastAPI). It takes frames from a video, runs MapAnything on the GPU, and writes `room.ply` and `result.json` next to the video. A video with more frames than one run can take is split into equal parts that share half their frames, and each part is lined up with the room so far on those shared frames, following VGGT-Long's chunk alignment (Deng et al., [arXiv 2507.16443](https://arxiv.org/abs/2507.16443), Section 3.1; written from the paper, no code copied). `result.json` records how well each join fit.
+- `worker/`: the 3D helper (Python, FastAPI). It takes frames from a video and runs MapAnything on the GPU. One run can only take about 24 frames on an 8 GB card, so a longer video gets one run spread over the whole video first, which sets the room's shape and size. Then the video is cut into equal parts for detail, and each part is lined up with that whole-video run on the frames they share. Last, every frame is merged into one solid surface (TSDF fusion with Open3D). It writes `room-surface.ply` (the solid room), `room.ply` (the same room as dots) and `result.json` (the numbers, including how well each part lined up) next to the video.
 - `frontend/`: React, TypeScript, Tailwind and three.js. The student's request page and 3D view with a measuring tool, and the landlord's filming page.
+
+## Research behind it
+
+I read these papers before and during the build. Here's what each one does, what SightSeen takes from it, and why I picked it over the other options.
+
+**MapAnything** (Meta, [arXiv 2509.13414](https://arxiv.org/abs/2509.13414)). Turns photos into a 3D scene in metres, with every camera's position. It's the core of SightSeen.
+- Why this one: a student needs real sizes, and MapAnything gives metres straight away. VGGT (also Meta) gives the shape but not the real size, because it's trained on scenes scaled to a standard size. MASt3R gives metric 3D too, but its code is non-commercial only (CC BY-NC-SA 4.0).
+- On my own room it measured my desk at 77 to 79 cm. The tape says 77.
+- SightSeen uses the Apache 2.0 checkpoint by default. The non-commercial one is only there to compare. I'll pick one before the end.
+
+**SAM 3** (Meta, [arXiv 2511.16719](https://arxiv.org/abs/2511.16719)), as SAM 3.1 on the Meta Model API. Finds and outlines every object that matches a short phrase like "door", in photos and video.
+- Why this one: UniMetric's paper used SAM 2.1, which needs a click or a box for each object. SAM 3 takes words, so SightSeen can ask for doors and outlets with nobody clicking.
+- Status: planned, for the size check below.
+
+**UniMetric** ([arXiv 2610.16945](https://arxiv.org/abs/2610.16945)). Checks and fixes a 3D model's size using everyday things with a known size range, like doors and outlets.
+- Why: MapAnything got my desk right, but one desk isn't proof. I'd rather build more than show a student wrong sizes.
+- To be fair to it: the paper tested nine other 3D models on mostly driving, roadside and robot scenes, not MapAnything and not a bedroom. So I'll judge it the same way, by tape against the 3D. Its code has no licence yet, so SightSeen will implement it from the paper's equations.
+- Status: next.
+
+**VGGT-Long** ([arXiv 2507.16443](https://arxiv.org/abs/2507.16443)). Cuts long videos into parts a 3D model can handle, then lines the parts up.
+- What SightSeen takes: its way of lining up a part (Section 3.1). One fit per part, where points the model is unsure of count less and points that sit way off get ignored. Written from the paper, no code copied.
+- What I changed: VGGT-Long lines each part up with the one before. When I tried that on my room, small errors stacked up and sizes drifted by up to about 5%. SightSeen lines every part up with one run over the whole video instead. Sizes came back to within about 1% of the one-run version.
+
+**G4Splat** ([arXiv 2510.12099](https://arxiv.org/abs/2510.12099)). Fills the parts of a room no camera saw. It finds flat surfaces like walls and floors and uses them to guide an AI video model.
+- What SightSeen takes: the ideas, not the code. Find the gaps by what the cameras covered, and use flat surfaces to fill walls and floors.
+- Why not run it: it takes about an hour per room on a 24 to 80 GB graphics card, on Linux. SightSeen runs on an 8 GB Windows card.
+
+**The solid surface: TSDF fusion** (Open3D, MIT). Merges every frame's depth into one surface, so walls are solid instead of millions of loose dots.
+- Why not Gaussian splats yet: splats look more like a photo, but they need training for every room and they're hard to measure on. A surface keeps the measuring tool working, is light enough for VR, and gives real floors and walls to place things on later. Splats can go on top of it.
 
 ## Run it
 

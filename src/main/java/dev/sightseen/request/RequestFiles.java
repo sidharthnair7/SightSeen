@@ -13,7 +13,8 @@ import java.util.Set;
 
 /**
  * Each request gets a folder, data/requests/{id}/, shared with the Python helper: the video goes in, and the helper
- * writes frames/, room.ply and result.json next to it. File names are always ours, never the uploader's.
+ * writes frames/, room-surface.ply, room.ply and result.json next to it. File names are always ours, never the
+ * uploader's.
  */
 @Component
 public class RequestFiles {
@@ -51,6 +52,11 @@ public class RequestFiles {
 
     public Path roomFile(String requestId) {
         return folder(requestId).resolve("room.ply");
+    }
+
+    /** The room as a solid surface (a triangle mesh). Rooms built before the surface existed don't have one. */
+    public Path surfaceFile(String requestId) {
+        return folder(requestId).resolve("room-surface.ply");
     }
 
     private static String extension(String fileName) {

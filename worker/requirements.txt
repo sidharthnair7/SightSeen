@@ -3,3 +3,6 @@ fastapi
 uvicorn[standard]
 python-multipart
 opencv-python
+# Open3D (installed by setup.sh on its own, without its notebook extras) imports these two when it starts
+plotly==7.1.0
+dash==4.5.0

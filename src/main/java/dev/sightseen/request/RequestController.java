@@ -58,12 +58,21 @@ class RequestController {
     @GetMapping("/{id}/room.ply")
     ResponseEntity<Resource> room(@PathVariable String id) {
         RoomRequest r = service.byId(id);
-        Path ply = files.roomFile(r.getId());
-        if (!Files.exists(ply)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "The 3D room isn't ready yet.");
+        return ply(files.roomFile(r.getId()), "The 3D room isn't ready yet.");
+    }
+
+    @GetMapping("/{id}/room-surface.ply")
+    ResponseEntity<Resource> surface(@PathVariable String id) {
+        RoomRequest r = service.byId(id);
+        return ply(files.surfaceFile(r.getId()), "This room has no solid surface. Build it again to make one.");
+    }
+
+    private static ResponseEntity<Resource> ply(Path file, String missing) {
+        if (!Files.exists(file)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, missing);
         }
         return ResponseEntity.ok()
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)
-                .body(new FileSystemResource(ply));
+                .body(new FileSystemResource(file));
     }
 }

@@ -6,24 +6,38 @@ import { Ruler, X } from 'lucide-react'
 
 const MARK = '#f59e0b'
 
+type Look = 'solid' | 'dots'
+
 /**
- * The 3D room as coloured points. Drag to turn, scroll to zoom, right-drag to move.
- * A click (not a drag) on the room drops a marker; two markers give the straight-line distance between them.
- * The dot-size slider makes the points bigger, so the room looks less see-through.
+ * The 3D room, as a solid surface when the room has one, or as coloured points. Drag to turn, scroll to zoom,
+ * right-drag to move. A click (not a drag) on the room drops a marker; two markers give the straight-line distance
+ * between them. In the dots look, the dot-size slider makes the points bigger, so the room looks less see-through.
  */
 export default function RoomViewer({ url }: { url: string }) {
   const host = useRef<HTMLDivElement>(null)
   const clear = useRef<() => void>(() => {})
   const material = useRef<THREE.PointsMaterial | null>(null)
   const baseSize = useRef(0.01)
+  const surfaceMesh = useRef<THREE.Mesh | null>(null)
+  const cloudPoints = useRef<THREE.Points | null>(null)
+  const shown = useRef<Look>('dots')
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [picked, setPicked] = useState(0)
   const [distance, setDistance] = useState<number | null>(null)
   const [dots, setDots] = useState(1)
+  const [look, setLook] = useState<Look>('solid')
+  const [hasSurface, setHasSurface] = useState(false)
+  const showing: Look = hasSurface && look === 'solid' ? 'solid' : 'dots'
 
   useEffect(() => {
     if (material.current) material.current.size = baseSize.current * dots
   }, [dots, state])
+
+  useEffect(() => {
+    shown.current = showing
+    if (surfaceMesh.current) surfaceMesh.current.visible = showing === 'solid'
+    if (cloudPoints.current) cloudPoints.current.visible = showing === 'dots'
+  }, [showing, state])
 
   useEffect(() => {
     const el = host.current
@@ -32,6 +46,7 @@ export default function RoomViewer({ url }: { url: string }) {
     setState('loading')
     setPicked(0)
     setDistance(null)
+    setHasSurface(false)
 
     const renderer = new THREE.WebGLRenderer({ antialias: true })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -51,7 +66,18 @@ export default function RoomViewer({ url }: { url: string }) {
     scene.add(marks)
     const points: THREE.Vector3[] = []
     let cloud: THREE.Points | null = null
+    let surface: THREE.Mesh | null = null
     let markerRadius = 0.02
+
+    // The solid surface sits next to the points; older rooms don't have one, and then the dots are all there is
+    new PLYLoader().load(url.replace('/room.ply', '/room-surface.ply'), geometry => {
+      if (disposed) return
+      surface = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
+      surface.visible = shown.current === 'solid'
+      surfaceMesh.current = surface
+      scene.add(surface)
+      setHasSurface(true)
+    }, undefined, () => {})
 
     new PLYLoader().load(url, geometry => {
       if (disposed) return
@@ -61,6 +87,8 @@ export default function RoomViewer({ url }: { url: string }) {
       baseSize.current = Math.max(0.006, sphere.radius / 120)
       material.current = new THREE.PointsMaterial({ size: baseSize.current, vertexColors: true })
       cloud = new THREE.Points(geometry, material.current)
+      cloud.visible = shown.current === 'dots'
+      cloudPoints.current = cloud
       scene.add(cloud)
       // Start a step back from the middle, roughly where the video began, looking into the room
       controls.target.copy(sphere.center)
@@ -90,7 +118,7 @@ export default function RoomViewer({ url }: { url: string }) {
         -((e.clientY - rect.top) / rect.height) * 2 + 1,
       )
       raycaster.setFromCamera(ndc, camera)
-      const hit = raycaster.intersectObject(cloud)[0]
+      const hit = raycaster.intersectObject(shown.current === 'solid' && surface ? surface : cloud)[0]
       if (!hit) return
       if (points.length === 2) {
         points.length = 0
@@ -143,6 +171,12 @@ export default function RoomViewer({ url }: { url: string }) {
       cloud?.geometry.dispose()
       material.current?.dispose()
       material.current = null
+      cloudPoints.current = null
+      if (surface) {
+        surface.geometry.dispose()
+        ;(surface.material as THREE.Material).dispose()
+      }
+      surfaceMesh.current = null
       renderer.dispose()
       el.removeChild(renderer.domElement)
     }
@@ -176,18 +210,36 @@ export default function RoomViewer({ url }: { url: string }) {
         Drag to turn, scroll to zoom, right-drag to move.
       </p>
       {state === 'ready' && (
-        <label className="absolute bottom-3 right-3 flex items-center gap-2 rounded-lg bg-black/60 px-3 py-2 text-xs text-white">
-          Dot size
-          <input
-            type="range"
-            min={0.5}
-            max={3}
-            step={0.25}
-            value={dots}
-            onChange={e => setDots(Number(e.target.value))}
-            className="w-28 accent-amber-500"
-          />
-        </label>
+        <div className="absolute bottom-3 right-3 flex items-center gap-2">
+          {hasSurface && (
+            <div className="flex overflow-hidden rounded-lg bg-black/60 text-xs text-white">
+              {(['solid', 'dots'] as const).map(option => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => setLook(option)}
+                  className={`px-3 py-2 ${look === option ? 'bg-amber-500 text-black' : 'hover:bg-black/40'}`}
+                >
+                  {option === 'solid' ? 'Solid' : 'Dots'}
+                </button>
+              ))}
+            </div>
+          )}
+          {showing === 'dots' && (
+            <label className="flex items-center gap-2 rounded-lg bg-black/60 px-3 py-2 text-xs text-white">
+              Dot size
+              <input
+                type="range"
+                min={0.5}
+                max={3}
+                step={0.25}
+                value={dots}
+                onChange={e => setDots(Number(e.target.value))}
+                className="w-28 accent-amber-500"
+              />
+            </label>
+          )}
+        </div>
       )}
     </div>
   )

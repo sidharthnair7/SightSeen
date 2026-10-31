@@ -11,6 +11,7 @@ PY=".venv/Scripts/python.exe"
 uv pip install --python "$PY" torch torchvision --torch-backend=auto
 uv pip install --python "$PY" -e vendor/map-anything --torch-backend=auto
 uv pip install --python "$PY" -r requirements.txt
+uv pip install --python "$PY" --no-deps open3d==0.20.0  # the solid surface; its other extras are for notebooks
 
 "$PY" -c "import torch; print('torch', torch.__version__, 'GPU:', torch.cuda.is_available())"
 "$PY" -c "
