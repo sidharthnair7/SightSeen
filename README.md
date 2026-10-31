@@ -12,7 +12,7 @@ Students renting from far away can't visit a place before signing. With SightSee
 ## How it fits together
 
 - `src/`: Spring Boot (Java 25). Requests, the student's and the landlord's APIs, and the jobs sent to the 3D helper. Data lives in `data/` (an H2 file, the videos and the 3D rooms).
-- `worker/`: the 3D helper (Python, FastAPI). It takes frames from a video, runs MapAnything on the GPU, and writes `room.ply` and `result.json` next to the video.
+- `worker/`: the 3D helper (Python, FastAPI). It takes frames from a video, runs MapAnything on the GPU, and writes `room.ply` and `result.json` next to the video. A video with more frames than one run can take is split into equal parts that share half their frames, and each part is lined up with the room so far on those shared frames, following VGGT-Long's chunk alignment (Deng et al., [arXiv 2507.16443](https://arxiv.org/abs/2507.16443), Section 3.1; written from the paper, no code copied). `result.json` records how well each join fit.
 - `frontend/`: React, TypeScript, Tailwind and three.js. The student's request page and 3D view with a measuring tool, and the landlord's filming page.
 
 ## Run it
