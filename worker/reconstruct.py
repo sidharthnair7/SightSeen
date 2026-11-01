@@ -2,8 +2,9 @@
 
 A GPU with 8 GB can only take about 24 frames in one MapAnything run. A longer video gets one run of 24 frames spread
 over the whole video first: that run sets the room's shape and size (the one-run version measured right). The video is
-then split into equal parts, and each part lines up with that whole-video run on the frames they share (the fit is
-VGGT-Long's, arXiv 2507.16443, Section 3.1). Lining every part up with the same run means errors can't stack up from
+then split into equal parts. Each part is given the whole-video run's camera positions for the frames they share
+(MapAnything takes known camera positions as input), so it's built to agree with that run, and is then lined up with
+it on those frames (the fit is VGGT-Long's, arXiv 2507.16443, Section 3.1). Lining every part up with the same run means errors can't stack up from
 part to part. Every join reports how well it fit.
 
 All the frames are then fused into one surface (TSDF fusion: each frame's depth votes into a grid of small cubes, the
@@ -51,6 +52,9 @@ BRUSH = Path(os.environ.get("SIGHTSEEN_BRUSH", Path(__file__).parent / "vendor" 
 SPLAT_STEPS = 15_000  # Brush's training steps for the photo look: fewer is faster and blurrier
 SPLAT_MAX = 500_000  # left alone, Brush grew take 2 to 2.84 million splats (670 MB); this keeps the file browser-sized
 SPLAT_SH = 1  # how much a splat's colour can change with the viewing angle; Brush's default (3) is 3 times the file
+# Give each part the whole-video run's camera positions for the frames they share, so MapAnything builds the part to
+# agree with it before it's lined up (on take 3: worst join 8.8 cm down to 3.9). SIGHTSEEN_HAND_OVER=0 turns it off.
+HAND_OVER_POSES = os.environ.get("SIGHTSEEN_HAND_OVER", "1") != "0"
 INFER = dict(
     memory_efficient_inference=True,
     minibatch_size=1,  # smallest GPU memory use
@@ -157,12 +161,17 @@ def _frame(pred):
     return {"pts": pts, "valid": valid, "conf": conf, "rgb": rgb, "depth": depth, "lens": lens, "pose": pose}
 
 
-def _rebuild(model, frames, indices):
-    """One MapAnything run on some of the frames. Returns {frame number: that frame}, the seconds it took and the
-    run's metric scale factor."""
+def _rebuild(model, frames, indices, known=None):
+    """One MapAnything run on some of the frames. `known` gives camera positions (frame number -> 4 x 4 camera to
+    world, metres) MapAnything should take as given; the first frame must be one of them. Returns {frame number:
+    that frame}, the seconds it took and the run's metric scale factor."""
     from mapanything.utils.image import load_images
 
     views = load_images([frames[i] for i in indices])
+    for view, i in zip(views, indices):
+        if known and i in known:
+            view["camera_poses"] = torch.from_numpy(known[i].astype(np.float32))[None]
+            view["is_metric_scale"] = torch.tensor([True])
     started = time.perf_counter()
     with torch.no_grad():
         predictions = model.infer(views, **INFER)
@@ -411,7 +420,11 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
     joins = []
     for number, indices in enumerate(parts, start=1):
         stage(f"adding detail: part {number} of {len(parts)} ({len(indices)} frames)")
-        part, part_seconds, _ = _rebuild(model, frames, indices)
+        known = {i: anchor[i]["pose"] for i in indices if i in anchor} if HAND_OVER_POSES else None
+        if known:
+            first = next(i for i in indices if i in known)
+            indices = [first] + [i for i in indices if i != first]  # MapAnything needs a known camera first
+        part, part_seconds, _ = _rebuild(model, frames, indices, known)
         seconds += part_seconds
         fit, report = _join(part, anchor, number)
         joins.append(report)

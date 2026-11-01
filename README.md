@@ -12,7 +12,7 @@ Students renting from far away can't visit a place before signing. With SightSee
 ## How it fits together
 
 - `src/`: Spring Boot (Java 25). Requests, the student's and the landlord's APIs, and the jobs sent to the 3D helper. Data lives in `data/` (an H2 file, the videos and the 3D rooms).
-- `worker/`: the 3D helper (Python, FastAPI). It takes frames from a video and runs MapAnything on the GPU. One run can only take about 24 frames on an 8 GB card, so a longer video gets one run spread over the whole video first, which sets the room's shape and size. Then the video is cut into equal parts for detail, and each part is lined up with that whole-video run on the frames they share. Last, every frame is merged into one solid surface (TSDF fusion with Open3D). It writes `room-surface.ply` (the solid room), `room.ply` (the same room as dots) and `result.json` (the numbers, including how well each part lined up) next to the video.
+- `worker/`: the 3D helper (Python, FastAPI). It takes frames from a video and runs MapAnything on the GPU. One run can only take about 24 frames on an 8 GB card, so a longer video gets one run spread over the whole video first, which sets the room's shape and size. Then the video is cut into equal parts for detail. Each part gets the whole-video run's camera positions for the frames they share, so MapAnything builds it to agree, and then it's lined up with that run. Last, every frame is merged into one solid surface (TSDF fusion with Open3D). It writes `room-surface.ply` (the solid room), `room.ply` (the same room as dots) and `result.json` (the numbers, including how well each part lined up) next to the video.
 - `frontend/`: React, TypeScript, Tailwind and three.js. The student's request page and 3D view with a measuring tool, and the landlord's filming page.
 
 ## Research behind it
@@ -35,7 +35,7 @@ I read these papers before and during the build. Here's what each one does, what
 
 **VGGT-Long** ([arXiv 2507.16443](https://arxiv.org/abs/2507.16443)). Cuts long videos into parts a 3D model can handle, then lines the parts up.
 - What SightSeen takes: its way of lining up a part (Section 3.1). One fit per part, where points the model is unsure of count less and points that sit way off get ignored. Written from the paper, no code copied.
-- What I changed: VGGT-Long lines each part up with the one before. When I tried that on my room, small errors stacked up and sizes drifted by up to about 5%. SightSeen lines every part up with one run over the whole video instead. Sizes came back to within about 1% of the one-run version.
+- What I changed: VGGT-Long lines each part up with the one before. When I tried that on my room, small errors stacked up and sizes drifted by up to about 5%. SightSeen lines every part up with one run over the whole video instead. Sizes came back to within about 1% of the one-run version. It also hands each part that run's camera positions first, since MapAnything can take known camera positions as input. On my room that cut the worst gap between parts from 8.8 cm to 3.9 cm.
 
 **G4Splat** ([arXiv 2510.12099](https://arxiv.org/abs/2510.12099)). Fills the parts of a room no camera saw. It finds flat surfaces like walls and floors and uses them to guide an AI video model.
 - What SightSeen takes: the ideas, not the code. Find the gaps by what the cameras covered, and use flat surfaces to fill walls and floors.
