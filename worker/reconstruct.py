@@ -52,9 +52,13 @@ BRUSH = Path(os.environ.get("SIGHTSEEN_BRUSH", Path(__file__).parent / "vendor" 
 SPLAT_STEPS = 15_000  # Brush's training steps for the photo look: fewer is faster and blurrier
 SPLAT_MAX = 500_000  # left alone, Brush grew take 2 to 2.84 million splats (670 MB); this keeps the file browser-sized
 SPLAT_SH = 1  # how much a splat's colour can change with the viewing angle; Brush's default (3) is 3 times the file
+SPLAT_MAX_SIDE = 1920  # Brush's own --max-resolution: frames for splat training are stored no bigger than this
 # Give each part the whole-video run's camera positions for the frames they share, so MapAnything builds the part to
 # agree with it before it's lined up (on take 3: worst join 8.8 cm down to 3.9). SIGHTSEEN_HAND_OVER=0 turns it off.
 HAND_OVER_POSES = os.environ.get("SIGHTSEEN_HAND_OVER", "1") != "0"
+# The size MapAnything reads frames at, as pixels on the long side. 0 keeps its own size (518). Smaller frames let more
+# of them into one run on an 8 GB GPU (about 81 at 280 px), so a video needs no parts and no joins.
+INPUT_SIZE = int(os.environ.get("SIGHTSEEN_INPUT_SIZE", "0"))
 INFER = dict(
     memory_efficient_inference=True,
     minibatch_size=1,  # smallest GPU memory use
@@ -66,6 +70,8 @@ INFER = dict(
     confidence_percentile=10,
 )
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if DEVICE == "cuda" and not torch.cuda.is_bf16_supported():
+    INFER["amp_dtype"] = "fp16"  # older GPUs (a T4, say) can't do bf16 maths
 
 _loaded = {"key": None, "model": None}
 
@@ -94,36 +100,53 @@ def _model(key):
     return _loaded["model"]
 
 
+def sharpness(frame):
+    """How sharp a frame is: the variance of its Laplacian (edges stand out in a sharp frame, a blurred one is flat),
+    measured on a copy at most 480 px on the long side so a 4K video doesn't slow it down."""
+    small = cv2.resize(frame, None, fx=min(1.0, 480 / max(frame.shape[:2])), fy=min(1.0, 480 / max(frame.shape[:2])),
+                       interpolation=cv2.INTER_AREA)
+    return float(cv2.Laplacian(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
+
+
 def extract_frames(video_path, frames_dir, fps, max_frames):
-    """Takes about `fps` frames per second of video, spread evenly, and never more than `max_frames`."""
+    """Takes about `fps` frames per second of video, never more than `max_frames`: the video is cut into that many
+    equal slots and each slot gives its sharpest frame, so frames blurred by walking are left out."""
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise ValueError("Couldn't open the video. It may be damaged or in a format this PC can't read.")
     native_fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
     total = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-
-    if total > 0:
-        wanted_count = int(min(max_frames, max(2, round(total / native_fps * fps))))
-        wanted = set(np.linspace(0, total - 1, wanted_count).round().astype(int).tolist())
+    if total <= 0:
+        total = 10**9  # some files don't say how long they are; then each slot is 1/fps seconds of video
+        slot_length = max(1, round(native_fps / fps))
     else:
-        # Some files don't say how many frames they have; take every nth frame instead
-        step = max(1, round(native_fps / fps))
-        wanted = None
+        slots = int(min(max_frames, max(2, round(total / native_fps * fps))))
+        slot_length = total / slots
 
     if frames_dir.exists():
         shutil.rmtree(frames_dir)
     frames_dir.mkdir(parents=True)
 
-    paths, index = [], 0
+    paths, best, best_score, slot, index = [], None, -1.0, 0, 0
+
+    def keep(frame):
+        path = frames_dir / f"frame_{len(paths):04d}.jpg"
+        cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        paths.append(str(path))
+
     while len(paths) < max_frames:
         ok, frame = capture.read()
         if not ok:
             break
-        if (wanted is not None and index in wanted) or (wanted is None and index % step == 0):
-            path = frames_dir / f"frame_{len(paths):04d}.jpg"
-            cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            paths.append(str(path))
+        if int(index // slot_length) != slot:  # this frame starts the next slot: keep the last slot's sharpest
+            keep(best)
+            best, best_score, slot = None, -1.0, int(index // slot_length)
+        score = sharpness(frame)
+        if score > best_score:
+            best, best_score = frame, score
         index += 1
+    if best is not None and len(paths) < max_frames:
+        keep(best)
     capture.release()
 
     if len(paths) < 2:
@@ -167,7 +190,8 @@ def _rebuild(model, frames, indices, known=None):
     that frame}, the seconds it took and the run's metric scale factor."""
     from mapanything.utils.image import load_images
 
-    views = load_images([frames[i] for i in indices])
+    paths = [frames[i] for i in indices]
+    views = load_images(paths, resize_mode="longest_side", size=INPUT_SIZE) if INPUT_SIZE else load_images(paths)
     for view, i in zip(views, indices):
         if known and i in known:
             view["camera_poses"] = torch.from_numpy(known[i].astype(np.float32))[None]
@@ -320,10 +344,22 @@ def _quaternion(turn):
     return w, x, y, z
 
 
-def _write_splat_data(room, points, colours, folder):
-    """Writes what a Gaussian splat trainer (Brush) starts from, in COLMAP's text format: every frame as MapAnything
-    saw it, each camera's lens and position, and the room's points as the starting splats. OpenCV axes throughout,
-    which is COLMAP's own convention."""
+def _full_size_lens(lens, seen, original):
+    """MapAnything's lens numbers for the original frame instead of the copy it read. That copy was scaled until it
+    covered the target size, then cropped in the middle (mapanything.utils.cropping.crop_resize_if_necessary), so
+    undo the crop, then the scale. `seen` and `original` are (width, height)."""
+    scale = max(seen[0] / original[0], seen[1] / original[1])
+    crop_x = (original[0] * scale - seen[0]) / 2
+    crop_y = (original[1] * scale - seen[1]) / 2
+    return np.array([[lens[0, 0] / scale, 0, (lens[0, 2] + crop_x) / scale],
+                     [0, lens[1, 1] / scale, (lens[1, 2] + crop_y) / scale],
+                     [0, 0, 1]])
+
+
+def _write_splat_data(room, points, colours, folder, frames):
+    """Writes what a Gaussian splat trainer (Brush) starts from, in COLMAP's text format: every frame at its original
+    size (more detail than MapAnything's smaller copy), each camera's lens and position, and the room's points as the
+    starting splats. OpenCV axes throughout, which is COLMAP's own convention."""
     if folder.exists():
         shutil.rmtree(folder)
     (folder / "images").mkdir(parents=True)
@@ -332,10 +368,16 @@ def _write_splat_data(room, points, colours, folder):
     cameras = ["# CAMERA_ID MODEL WIDTH HEIGHT fx fy cx cy"]
     images = ["# IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME, then a line of 2D points (none here)"]
     for number, (i, f) in enumerate(sorted(room.items()), start=1):
-        name = f"frame_{i:04d}.png"
-        cv2.imwrite(str(folder / "images" / name), cv2.cvtColor(f["rgb"], cv2.COLOR_RGB2BGR))
-        height, width = f["rgb"].shape[:2]
-        lens = f["lens"]
+        name = Path(frames[i]).with_suffix(".png").name  # Brush 0.3 fails on these JPGs ("early eof"); PNG loads fine
+        original = cv2.imread(frames[i])
+        height, width = original.shape[:2]
+        lens = _full_size_lens(f["lens"], (f["rgb"].shape[1], f["rgb"].shape[0]), (width, height))
+        shrink = min(1.0, SPLAT_MAX_SIDE / max(width, height))
+        if shrink < 1.0:  # a 4K phone video: Brush trains at 1920 px at most, so don't store more
+            width, height = round(width * shrink), round(height * shrink)
+            original = cv2.resize(original, (width, height), interpolation=cv2.INTER_AREA)
+            lens[:2] *= shrink
+        cv2.imwrite(str(folder / "images" / name), original)
         cameras.append(f"{number} PINHOLE {width} {height} {lens[0, 0]:.4f} {lens[1, 1]:.4f} {lens[0, 2]:.4f} {lens[1, 2]:.4f}")
         to_camera = f["pose"][:3, :3].T.astype(np.float64)  # COLMAP stores world-to-camera
         shift = -to_camera @ f["pose"][:3, 3].astype(np.float64)
@@ -453,7 +495,7 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
         chosen = np.random.default_rng(0).choice(len(points), MAX_POINTS, replace=False)
         points, colours = points[chosen], colours[chosen]
     filled = int(len(np.unique(_cells(points, CUBE))))
-    _write_splat_data(room, points, colours, out / "splat-data")
+    _write_splat_data(room, points, colours, out / "splat-data", frames)
     room.clear()
     points = points * np.array([1.0, -1.0, -1.0], dtype=np.float32)  # OpenCV axes to three.js axes
     write_ply(out / "room.ply", points, colours)
