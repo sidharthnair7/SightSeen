@@ -67,6 +67,12 @@ class RequestController {
         return ply(files.surfaceFile(r.getId()), "This room has no solid surface. Build it again to make one.");
     }
 
+    @GetMapping("/{id}/room-splats.ply")
+    ResponseEntity<Resource> splats(@PathVariable String id) {
+        RoomRequest r = service.byId(id);
+        return ply(files.splatsFile(r.getId()), "This room has no splats. Build it again to make them.");
+    }
+
     private static ResponseEntity<Resource> ply(Path file, String missing) {
         if (!Files.exists(file)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, missing);

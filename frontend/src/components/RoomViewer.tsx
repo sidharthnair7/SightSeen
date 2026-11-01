@@ -2,22 +2,50 @@ import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js'
+import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark'
 import { Ruler, X } from 'lucide-react'
 
 const MARK = '#f59e0b'
 
-type Look = 'solid' | 'dots'
+type Look = 'real' | 'solid' | 'dots'
+
+const LABELS: Record<Look, string> = { real: 'Real', solid: 'Solid', dots: 'Dots' }
+
+// One WebGL renderer and one Spark renderer for the whole app. Spark keeps shared GPU data tied to the renderer it
+// first draws with, so a viewer that made its own renderer (React builds effects twice in development, and every
+// room change rebuilds the viewer) would leave Spark drawing into a thrown-away one, and the splats never show.
+let shared: { renderer: THREE.WebGLRenderer; spark: SparkRenderer } | null = null
+
+function sharedRenderer() {
+  if (!shared) {
+    // Spark asks for anti-aliasing off: it doesn't improve splats and costs a lot of speed (VR needs the speed)
+    const renderer = new THREE.WebGLRenderer({ antialias: false })
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    shared = { renderer, spark: new SparkRenderer({ renderer }) }
+  }
+  return shared
+}
+
+/** The look asked for, or the next best one this room has: splats, then the solid surface, then dots. */
+function pick(look: Look, hasSplats: boolean, hasSurface: boolean): Look {
+  if (look === 'real' && hasSplats) return 'real'
+  if (look !== 'dots' && hasSurface) return 'solid'
+  return 'dots'
+}
 
 /**
- * The 3D room, as a solid surface when the room has one, or as coloured points. Drag to turn, scroll to zoom,
- * right-drag to move. A click (not a drag) on the room drops a marker; two markers give the straight-line distance
- * between them. In the dots look, the dot-size slider makes the points bigger, so the room looks less see-through.
+ * The 3D room: "Real" is Gaussian splats trained to look like the video, "Solid" the surface, "Dots" the points.
+ * Older rooms may only have some of them. Drag to turn, scroll to zoom, right-drag to move. A click (not a drag) on
+ * the room drops a marker; two markers give the straight-line distance between them. Measuring always hits the solid
+ * surface when there is one, even in the Real look, because a surface gives a steadier point than a blurry splat.
+ * In the dots look, the dot-size slider makes the points bigger, so the room looks less see-through.
  */
 export default function RoomViewer({ url }: { url: string }) {
   const host = useRef<HTMLDivElement>(null)
   const clear = useRef<() => void>(() => {})
   const material = useRef<THREE.PointsMaterial | null>(null)
   const baseSize = useRef(0.01)
+  const splatMesh = useRef<SplatMesh | null>(null)
   const surfaceMesh = useRef<THREE.Mesh | null>(null)
   const cloudPoints = useRef<THREE.Points | null>(null)
   const shown = useRef<Look>('dots')
@@ -25,9 +53,13 @@ export default function RoomViewer({ url }: { url: string }) {
   const [picked, setPicked] = useState(0)
   const [distance, setDistance] = useState<number | null>(null)
   const [dots, setDots] = useState(1)
-  const [look, setLook] = useState<Look>('solid')
+  const [look, setLook] = useState<Look>('real')
+  const [hasSplats, setHasSplats] = useState(false)
   const [hasSurface, setHasSurface] = useState(false)
-  const showing: Look = hasSurface && look === 'solid' ? 'solid' : 'dots'
+  const showing = pick(look, hasSplats, hasSurface)
+  const looks = (['real', 'solid', 'dots'] as const).filter(
+    option => option === 'dots' || (option === 'real' ? hasSplats : hasSurface),
+  )
 
   useEffect(() => {
     if (material.current) material.current.size = baseSize.current * dots
@@ -35,6 +67,7 @@ export default function RoomViewer({ url }: { url: string }) {
 
   useEffect(() => {
     shown.current = showing
+    if (splatMesh.current) splatMesh.current.visible = showing === 'real'
     if (surfaceMesh.current) surfaceMesh.current.visible = showing === 'solid'
     if (cloudPoints.current) cloudPoints.current.visible = showing === 'dots'
   }, [showing, state])
@@ -46,10 +79,10 @@ export default function RoomViewer({ url }: { url: string }) {
     setState('loading')
     setPicked(0)
     setDistance(null)
+    setHasSplats(false)
     setHasSurface(false)
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true })
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    const { renderer, spark } = sharedRenderer()
     renderer.setSize(el.clientWidth, el.clientHeight)
     el.appendChild(renderer.domElement)
 
@@ -68,6 +101,23 @@ export default function RoomViewer({ url }: { url: string }) {
     let cloud: THREE.Points | null = null
     let surface: THREE.Mesh | null = null
     let markerRadius = 0.02
+
+    // Splats come out of training in OpenCV axes (y down, z away from the camera); a half turn about x puts them
+    // in three.js axes, the same flip the surface and points already had
+    scene.add(spark)
+    const splats = new SplatMesh({ url: url.replace('/room.ply', '/room-splats.ply') })
+    splats.quaternion.set(1, 0, 0, 0)
+    splats.visible = false
+    splats.initialized.then(() => {
+      if (disposed) return
+      splatMesh.current = splats
+      splats.visible = shown.current === 'real'
+      scene.add(splats)
+      // Spark only re-sorts when the camera moves from where it last sorted, which starts at the origin looking
+      // down -z: the very view a room opens on. Without this, the splats stay invisible until the first drag.
+      spark.sortDirty = true
+      setHasSplats(true)
+    }, () => {})
 
     // The solid surface sits next to the points; older rooms don't have one, and then the dots are all there is
     new PLYLoader().load(url.replace('/room.ply', '/room-surface.ply'), geometry => {
@@ -90,9 +140,10 @@ export default function RoomViewer({ url }: { url: string }) {
       cloud.visible = shown.current === 'dots'
       cloudPoints.current = cloud
       scene.add(cloud)
-      // Start a step back from the middle, roughly where the video began, looking into the room
-      controls.target.copy(sphere.center)
-      camera.position.copy(sphere.center).add(new THREE.Vector3(0, sphere.radius * 0.25, sphere.radius * 0.9))
+      // Start exactly where the video began (the room's origin is the first frame's camera, looking down -z): splats
+      // only look like the video from where it was filmed, and it's the view the student already knows
+      controls.target.set(0, 0, -1)
+      camera.position.set(0, 0, 0)
       camera.near = Math.max(0.001, sphere.radius / 1000)
       camera.far = sphere.radius * 50
       camera.updateProjectionMatrix()
@@ -118,7 +169,7 @@ export default function RoomViewer({ url }: { url: string }) {
         -((e.clientY - rect.top) / rect.height) * 2 + 1,
       )
       raycaster.setFromCamera(ndc, camera)
-      const hit = raycaster.intersectObject(shown.current === 'solid' && surface ? surface : cloud)[0]
+      const hit = raycaster.intersectObject(shown.current !== 'dots' && surface ? surface : cloud)[0]
       if (!hit) return
       if (points.length === 2) {
         points.length = 0
@@ -177,7 +228,9 @@ export default function RoomViewer({ url }: { url: string }) {
         ;(surface.material as THREE.Material).dispose()
       }
       surfaceMesh.current = null
-      renderer.dispose()
+      splats.dispose()
+      splatMesh.current = null
+      scene.remove(spark)  // the shared renderers stay alive for the next room
       el.removeChild(renderer.domElement)
     }
   }, [url])
@@ -211,16 +264,16 @@ export default function RoomViewer({ url }: { url: string }) {
       </p>
       {state === 'ready' && (
         <div className="absolute bottom-3 right-3 flex items-center gap-2">
-          {hasSurface && (
+          {looks.length > 1 && (
             <div className="flex overflow-hidden rounded-lg bg-black/60 text-xs text-white">
-              {(['solid', 'dots'] as const).map(option => (
+              {looks.map(option => (
                 <button
                   key={option}
                   type="button"
                   onClick={() => setLook(option)}
-                  className={`px-3 py-2 ${look === option ? 'bg-amber-500 text-black' : 'hover:bg-black/40'}`}
+                  className={`px-3 py-2 ${showing === option ? 'bg-amber-500 text-black' : 'hover:bg-black/40'}`}
                 >
-                  {option === 'solid' ? 'Solid' : 'Dots'}
+                  {LABELS[option]}
                 </button>
               ))}
             </div>

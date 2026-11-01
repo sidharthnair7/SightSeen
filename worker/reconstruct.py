@@ -9,10 +9,14 @@ part to part. Every join reports how well it fit.
 All the frames are then fused into one surface (TSDF fusion: each frame's depth votes into a grid of small cubes, the
 grid keeps the average, and marching cubes pulls out triangles), so the walls are solid instead of dots.
 
+Last, Brush trains Gaussian splats on the frames and those cameras, so the room looks like the video.
+
 Everything is written into the request's folder, next to the video:
   frames/            the frames MapAnything saw
-  room-surface.ply   the 3D room as a coloured triangle mesh, in metres, in three.js axes (x right, y up, z towards the viewer)
-  room.ply           the same room as coloured points
+  splat-data/        what Brush trains on (COLMAP format, OpenCV axes)
+  room-splats.ply    the room as Gaussian splats, in OpenCV axes (x right, y down, z away from the first camera)
+  room-surface.ply   the room as a coloured triangle mesh, in metres, in three.js axes (x right, y up, z towards the viewer)
+  room.ply           the same room as coloured points, in three.js axes
   result.json        the run's numbers (the same dict run() returns)
 """
 
@@ -20,6 +24,7 @@ import json
 import math
 import os
 import shutil
+import subprocess
 import time
 import traceback
 from pathlib import Path
@@ -42,6 +47,10 @@ CUBE = 0.05  # 5 cm cubes for the "how much of the room is filled" number
 GRID = 256  # the surface's grid has at most this many cubes along each side (2 cm cubes in a room up to about 5 m)
 MAX_TRIANGLES = 800_000  # about 15 MB for the browser
 SMALLEST_PIECE = 200  # loose bits of surface with fewer triangles than this are floating noise
+BRUSH = Path(os.environ.get("SIGHTSEEN_BRUSH", Path(__file__).parent / "vendor" / "brush" / "brush_app.exe"))
+SPLAT_STEPS = 15_000  # Brush's training steps for the photo look: fewer is faster and blurrier
+SPLAT_MAX = 500_000  # left alone, Brush grew take 2 to 2.84 million splats (670 MB); this keeps the file browser-sized
+SPLAT_SH = 1  # how much a splat's colour can change with the viewing angle; Brush's default (3) is 3 times the file
 INFER = dict(
     memory_efficient_inference=True,
     minibatch_size=1,  # smallest GPU memory use
@@ -335,6 +344,24 @@ def _write_splat_data(room, points, colours, folder):
     (sparse / "points3D.txt").write_text("\n".join(lines) + "\n")
 
 
+def _train_splats(out):
+    """Gaussian splats with Brush: lots of small coloured blobs, adjusted until the room seen from each camera looks
+    like that frame, so the room looks like the video. Trains on splat-data/, writes room-splats.ply and a log, and
+    returns the seconds it took."""
+    if not BRUSH.exists():
+        raise FileNotFoundError(f"Brush isn't installed at {BRUSH} (see worker/setup.sh)")
+    started = time.perf_counter()
+    with open(out / "splats.log", "w", encoding="utf-8") as log:
+        subprocess.run([str(BRUSH), str(out / "splat-data"), "--total-steps", str(SPLAT_STEPS),
+                        "--max-splats", str(SPLAT_MAX), "--sh-degree", str(SPLAT_SH),
+                        "--export-every", str(SPLAT_STEPS), "--export-path", str(out),
+                        "--export-name", "room-splats.ply"],
+                       stdout=log, stderr=subprocess.STDOUT, check=True)
+    if not (out / "room-splats.ply").exists():
+        raise RuntimeError("Brush finished without writing room-splats.ply (see splats.log)")
+    return time.perf_counter() - started
+
+
 def write_ply(path, points, colours, triangles=None):
     """Binary PLY with 32-bit floats (WebGL can't draw 64-bit ones): coloured points, and triangles for a surface."""
     count = len(points)
@@ -423,6 +450,15 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
     low, high = np.percentile(points, 2, axis=0), np.percentile(points, 98, axis=0)
     size = high - low
 
+    stage("making it look like the video (a few minutes)")
+    (out / "room-splats.ply").unlink(missing_ok=True)  # a failed run mustn't leave an older room's splats behind
+    try:
+        splat_seconds = _train_splats(out)
+        splats, splats_error = "room-splats.ply", None
+    except Exception as error:  # noqa: BLE001 - the surface and dots still work, so failed splats don't fail the room
+        traceback.print_exc()
+        splat_seconds, splats, splats_error = None, None, f"{type(error).__name__}: {error}"
+
     result = {
         "frames": len(frames),
         "wholeVideoFrames": len(whole),
@@ -439,6 +475,9 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
         "ply": "room.ply",
         "surface": surface,
         "surfaceError": surface_error,
+        "splats": splats,
+        "splatSeconds": round(splat_seconds, 1) if splat_seconds is not None else None,
+        "splatsError": splats_error,
         "model": model_key,
         "joins": joins,
     }
