@@ -64,6 +64,31 @@ public class RequestFiles {
         return folder(requestId).resolve("room-splats.ply");
     }
 
+    /** Where the phone stood for each frame, so the viewer can walk the video's path. Older rooms don't have one. */
+    public Path camerasFile(String requestId) {
+        return folder(requestId).resolve("cameras.json");
+    }
+
+    /** Which way is up and where the floor is, so the viewer stands the room upright. Older rooms don't have one. */
+    public Path roomFrameFile(String requestId) {
+        return folder(requestId).resolve("room-frame.json");
+    }
+
+    /** The room's walls, floor and ceiling as a box, drawn clean behind the splats. Older rooms don't have one. */
+    public Path roomShellFile(String requestId) {
+        return folder(requestId).resolve("room-shell.json");
+    }
+
+    /** One of the room's own generated files by name (wall textures, furniture); the controller checks the name. */
+    public Path assetFile(String requestId, String name) {
+        return folder(requestId).resolve(name);
+    }
+
+    /** The furniture SAM 3.1 found, as blocks for the Walk look. Rooms built before it don't have one. */
+    public Path roomObjectsFile(String requestId) {
+        return folder(requestId).resolve("room-objects.json");
+    }
+
     private static String extension(String fileName) {
         if (fileName == null || !fileName.contains(".")) {
             return "";

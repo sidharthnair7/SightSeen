@@ -4,13 +4,38 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js'
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark'
 import { Ruler, X } from 'lucide-react'
+import { SHELL_FACES, type RoomShell } from './walk/types'
+import { texturedShellMaterials } from './walk/shellTextures'
+import { loadFurniture } from './walk/furniture'
 
 const MARK = '#f59e0b'
 const WALK_STEP = 0.1 // metres per scroll notch
+const WALK_FOV = 70 // degrees top to bottom in the Walk look: about what a person sees without turning their head
+// The clean shell sits this far behind the found walls. The worker trims the splats on and beyond the walls, so the
+// shell draws the walls, floor and ceiling, and the splats only the things in the room.
+const SHELL_GAP = 0.01
 
-type Look = 'real' | 'solid' | 'dots'
+type Look = 'real' | 'walk' | 'solid' | 'dots'
 
-const LABELS: Record<Look, string> = { real: 'Real', solid: 'Solid', dots: 'Dots' }
+/** One frame's camera from cameras.json: three.js axes, quaternion as w, x, y, z, widths of view in degrees. */
+type CameraSpot = { frame: string; position: number[]; quaternion: number[]; fovX: number; fovY: number }
+
+/** room-frame.json: the turn that stands the room upright (w, x, y, z) and the floor's height before it's moved to 0. */
+type RoomFrame = { quaternion: number[]; floorHeight: number; eyeHeight: number; ceilingHeight: number | null }
+
+/** room-objects.json: the furniture SAM 3.1 found, each as a block in the upright room (metres). */
+type RoomObjects = {
+  things: { name: string; centre: number[]; size: number[]; yawDegrees: number; colour: number[] }[]
+}
+
+/** A small JSON file next to the room, or null when this room doesn't have it (older rooms). */
+function fetchJson<T>(url: string): Promise<T | null> {
+  return fetch(url)
+    .then(response => (response.ok ? (response.json() as Promise<T>) : null))
+    .catch(() => null)
+}
+
+const LABELS: Record<Look, string> = { real: 'Real', walk: 'Walk', solid: 'Solid', dots: 'Dots' }
 
 // One WebGL renderer and one Spark renderer for the whole app. Spark keeps shared GPU data tied to the renderer it
 // first draws with, so a viewer that made its own renderer (React builds effects twice in development, and every
@@ -28,15 +53,17 @@ function sharedRenderer() {
 }
 
 /** The look asked for, or the next best one this room has: splats, then the solid surface, then dots. */
-function pick(look: Look, hasSplats: boolean, hasSurface: boolean): Look {
+function pick(look: Look, hasSplats: boolean, hasSurface: boolean, hasWalk: boolean): Look {
+  if (look === 'walk' && hasWalk) return 'walk'
   if (look === 'real' && hasSplats) return 'real'
   if (look !== 'dots' && hasSurface) return 'solid'
   return 'dots'
 }
 
 /**
- * The 3D room: "Real" is Gaussian splats trained to look like the video, "Solid" the surface, "Dots" the points.
- * Older rooms may only have some of them. Drag to look around (in place), scroll to walk, right-drag to step sideways. A click (not a drag) on
+ * The 3D room: "Real" is Gaussian splats trained to look like the video, "Walk" the room recreated clean (the shell's
+ * walls, floor and ceiling, and the furniture SAM 3.1 found as blocks at their real size) for moving around freely,
+ * "Solid" the surface, "Dots" the points. Older rooms may only have some of them. Drag to look around (in place), scroll to walk, right-drag to step sideways. A click (not a drag) on
  * the room drops a marker; two markers give the straight-line distance between them. Measuring always hits the solid
  * surface when there is one, even in the Real look, because a surface gives a steadier point than a blurry splat.
  * In the dots look, the dot-size slider makes the points bigger, so the room looks less see-through.
@@ -48,6 +75,9 @@ export default function RoomViewer({ url }: { url: string }) {
   const baseSize = useRef(0.01)
   const splatMesh = useRef<SplatMesh | null>(null)
   const surfaceMesh = useRef<THREE.Mesh | null>(null)
+  const shellMesh = useRef<THREE.Mesh | null>(null)
+  const blocks = useRef<THREE.Group | null>(null)
+  const refitView = useRef<() => void>(() => {})
   const cloudPoints = useRef<THREE.Points | null>(null)
   const shown = useRef<Look>('dots')
   const refreshSplats = useRef<() => void>(() => {})
@@ -58,10 +88,10 @@ export default function RoomViewer({ url }: { url: string }) {
   const [look, setLook] = useState<Look>('real')
   const [hasSplats, setHasSplats] = useState(false)
   const [hasSurface, setHasSurface] = useState(false)
-  const showing = pick(look, hasSplats, hasSurface)
-  const looks = (['real', 'solid', 'dots'] as const).filter(
-    option => option === 'dots' || (option === 'real' ? hasSplats : hasSurface),
-  )
+  const [hasWalk, setHasWalk] = useState(false)
+  const showing = pick(look, hasSplats, hasSurface, hasWalk)
+  const available: Record<Look, boolean> = { real: hasSplats, walk: hasWalk, solid: hasSurface, dots: true }
+  const looks = (['real', 'walk', 'solid', 'dots'] as const).filter(option => available[option])
 
   useEffect(() => {
     if (material.current) material.current.size = baseSize.current * dots
@@ -71,6 +101,9 @@ export default function RoomViewer({ url }: { url: string }) {
     shown.current = showing
     if (splatMesh.current) splatMesh.current.visible = showing === 'real'
     if (surfaceMesh.current) surfaceMesh.current.visible = showing === 'solid'
+    if (shellMesh.current) shellMesh.current.visible = showing !== 'dots'
+    if (blocks.current) blocks.current.visible = showing === 'walk'
+    refitView.current()
     if (cloudPoints.current) cloudPoints.current.visible = showing === 'dots'
     // Spark only rebuilds its splats when the camera moves more than 1 mm or its set of splats changes, and
     // showing splats that were hidden is neither: without this they stay invisible until the first drag
@@ -86,6 +119,7 @@ export default function RoomViewer({ url }: { url: string }) {
     setDistance(null)
     setHasSplats(false)
     setHasSurface(false)
+    setHasWalk(false)
 
     const { renderer, spark } = sharedRenderer()
     renderer.setSize(el.clientWidth, el.clientHeight)
@@ -118,7 +152,16 @@ export default function RoomViewer({ url }: { url: string }) {
     const points: THREE.Vector3[] = []
     let cloud: THREE.Points | null = null
     let surface: THREE.Mesh | null = null
+    let shell: THREE.Mesh | null = null
+    let things: THREE.Group | null = null
     let markerRadius = 0.02
+
+    // The room as filmed is tilted: its space is the first frame's camera. room-frame.json says which way is up and
+    // where the floor is, so everything goes in one group that stands the room upright with the floor at height 0
+    // (walking and VR both need that). Marks stay outside it: they're placed where the clicks hit, already upright.
+    const assets = url.replace('/room.ply', '/assets/') // the room's other generated files, by name
+    const room = new THREE.Group()
+    scene.add(room)
 
     // Splats come out of training in OpenCV axes (y down, z away from the camera); a half turn about x puts them
     // in three.js axes, the same flip the surface and points already had
@@ -133,9 +176,113 @@ export default function RoomViewer({ url }: { url: string }) {
       if (disposed) return
       splatMesh.current = splats
       splats.visible = shown.current === 'real'
-      scene.add(splats)
+      room.add(splats)
       setHasSplats(true)
+      requestAnimationFrame(() => refreshSplats.current())
     }, () => {})
+
+    // Start where the video began, at the phone's own width of view: splats only look like the video from near where
+    // it was filmed, and nothing on screen is then space the phone never saw from there
+    // In the Walk look nothing smears, so it uses a normal wide view instead
+    let fovX: number | null = null
+    const fitView = () => {
+      if (shown.current === 'walk') {
+        camera.fov = WALK_FOV
+      } else if (fovX !== null) {
+        const half = THREE.MathUtils.degToRad(fovX / 2)
+        camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(half) / camera.aspect))
+      }
+      camera.updateProjectionMatrix()
+    }
+    refitView.current = fitView
+
+    // Light for the Walk look's walls and blocks, so their faces shade apart (splats and the surface ignore it)
+    scene.add(new THREE.HemisphereLight('#ffffff', '#8a8f98', 2.2))
+    const sun = new THREE.DirectionalLight('#ffffff', 1.2)
+    sun.position.set(1, 3, 2)
+    scene.add(sun)
+    Promise.all([
+      fetchJson<RoomFrame>(url.replace('/room.ply', '/room-frame.json')),
+      fetchJson<CameraSpot[]>(url.replace('/room.ply', '/cameras.json')),
+      fetchJson<RoomShell>(url.replace('/room.ply', '/room-shell.json')),
+      fetchJson<RoomObjects>(url.replace('/room.ply', '/room-objects.json')),
+    ]).then(([frame, path, found, objects]) => {
+      if (disposed) return
+      if (frame) {
+        const [w, x, y, z] = frame.quaternion
+        room.quaternion.set(x, y, z, w)
+        room.position.set(0, -frame.floorHeight, 0)
+      }
+      if (frame && found) {
+        // The shell: one box seen from inside, its faces in BoxGeometry's order (+x, -x, +y, -y, +z, -z). It's
+        // opaque, so anything the splats smeared beyond the walls is hidden behind it.
+        const [width, height, length] = found.size
+        const colour = (rgb: number[]) =>
+          new THREE.MeshLambertMaterial({ color: new THREE.Color(rgb[0] / 255, rgb[1] / 255, rgb[2] / 255), side: THREE.BackSide })
+        shell = new THREE.Mesh(
+          new THREE.BoxGeometry(width + 2 * SHELL_GAP, height + 2 * SHELL_GAP, length + 2 * SHELL_GAP),
+          SHELL_FACES.map(face => colour(found.faces[face])),
+        )
+        // The real walls (photos from the frames) replace the flat colours when this room has them
+        const walls = shell
+        texturedShellMaterials(assets, found).then(materials => {
+          if (disposed || !materials) return
+          ;(walls.material as THREE.Material[]).forEach(m => m.dispose())
+          walls.material = materials
+        }, () => {})
+        shell.position.set(found.centre[0], found.centre[1], found.centre[2])
+        shell.rotation.y = -THREE.MathUtils.degToRad(found.yawDegrees)
+        shell.visible = shown.current !== 'dots'
+        shellMesh.current = shell
+        scene.add(shell)
+
+        // The furniture as clean blocks, each in the colour SAM 3.1 outlined, with dark edges so they read as solid
+        things = new THREE.Group()
+        for (const thing of objects?.things ?? []) {
+          const [r, g, b] = thing.colour
+          const box = new THREE.BoxGeometry(thing.size[0], thing.size[1], thing.size[2])
+          // Pushed back a touch in depth so the edge lines draw cleanly on top instead of flickering through
+          const face = new THREE.MeshLambertMaterial({
+            color: new THREE.Color(r / 255, g / 255, b / 255),
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1,
+          })
+          const block = new THREE.Mesh(box, face)
+          block.add(new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: '#1f2933' })))
+          block.position.set(thing.centre[0], thing.centre[1], thing.centre[2])
+          block.rotation.y = -THREE.MathUtils.degToRad(thing.yawDegrees)
+          block.name = thing.name
+          things.add(block)
+        }
+        things.visible = shown.current === 'walk'
+        blocks.current = things
+        scene.add(things)
+        setHasWalk(true)
+        // The furniture looking like the real thing replaces the plain blocks when this room has it
+        loadFurniture(assets).then(furniture => {
+          if (disposed || !furniture || !things) return
+          things.clear()
+          things.add(furniture)
+        }, () => {})
+      }
+      room.updateMatrixWorld(true)
+      const first = path?.[0]
+      const facing = room.quaternion.clone()
+      if (first) {
+        const [w, x, y, z] = first.quaternion
+        facing.multiply(new THREE.Quaternion(x, y, z, w))
+        camera.position.set(first.position[0], first.position[1], first.position[2])
+        fovX = first.fovX
+        fitView()
+      } else {
+        camera.position.set(0, 0, 0) // older rooms: their space starts at the first frame's camera
+      }
+      camera.position.applyMatrix4(room.matrixWorld)
+      controls.target.copy(camera.position).add(new THREE.Vector3(0, 0, -0.01).applyQuaternion(facing))
+      controls.update()
+      requestAnimationFrame(() => refreshSplats.current())
+    })
 
     // The solid surface sits next to the points; older rooms don't have one, and then the dots are all there is
     new PLYLoader().load(url.replace('/room.ply', '/room-surface.ply'), geometry => {
@@ -143,7 +290,7 @@ export default function RoomViewer({ url }: { url: string }) {
       surface = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
       surface.visible = shown.current === 'solid'
       surfaceMesh.current = surface
-      scene.add(surface)
+      room.add(surface)
       setHasSurface(true)
     }, undefined, () => {})
 
@@ -157,11 +304,7 @@ export default function RoomViewer({ url }: { url: string }) {
       cloud = new THREE.Points(geometry, material.current)
       cloud.visible = shown.current === 'dots'
       cloudPoints.current = cloud
-      scene.add(cloud)
-      // Start exactly where the video began (the room's origin is the first frame's camera, looking down -z): splats
-      // only look like the video from where it was filmed, and it's the view the student already knows
-      controls.target.set(0, 0, -0.01)
-      camera.position.set(0, 0, 0)
+      room.add(cloud)
       camera.near = Math.max(0.001, sphere.radius / 1000)
       camera.far = sphere.radius * 50
       camera.updateProjectionMatrix()
@@ -219,6 +362,7 @@ export default function RoomViewer({ url }: { url: string }) {
       renderer.setSize(el.clientWidth, el.clientHeight)
       camera.aspect = el.clientWidth / el.clientHeight
       camera.updateProjectionMatrix()
+      fitView()
     })
     resize.observe(el)
 
@@ -247,9 +391,22 @@ export default function RoomViewer({ url }: { url: string }) {
         ;(surface.material as THREE.Material).dispose()
       }
       surfaceMesh.current = null
+      if (shell) {
+        shell.geometry.dispose()
+        ;(shell.material as THREE.Material[]).forEach(m => m.dispose())
+      }
+      shellMesh.current = null
+      things?.traverse(part => {
+        if (part instanceof THREE.Mesh || part instanceof THREE.LineSegments) {
+          part.geometry.dispose()
+          ;(part.material as THREE.Material).dispose()
+        }
+      })
+      blocks.current = null
       splats.dispose()
       splatMesh.current = null
       refreshSplats.current = () => {}
+      refitView.current = () => {}
       scene.remove(spark)  // the shared renderers stay alive for the next room
       el.removeChild(renderer.domElement)
     }

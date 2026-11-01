@@ -73,6 +73,18 @@ COLMAP_MAX_SIDE = 1024  # COLMAP finds features on a copy at most this big, so a
 ADD_BACK = os.environ.get("SIGHTSEEN_ADD_BACK", "1") != "0"
 ADD_BACK_NEIGHBOURS = 8  # placed frames nearest in the video, used to line each one up
 ADD_BACK_MAX_GAP = 0.15  # metres: neighbours lining up worse than this means MapAnything's camera can't be trusted
+FLAT_DEGREES = 15  # surface facing within this many degrees of up or down counts as flat (floor, bed, desk, ceiling)
+# A fitted patch must face within this of up to count: on take 3 the real floor, bed and ceiling sat 1.2 to 2.4 degrees
+# off the cameras' up, and the noisy bits of floor 10 to 13
+PLANE_DEGREES = 8
+MIN_EYE, MAX_EYE = 0.9, 2.0  # metres: a phone held for filming sits in here, so a floor outside it is the wrong patch
+LEVEL_SPREAD = 0.10  # metres: flat patches this close to the lowest (or highest) one are the same floor (or ceiling)
+WALL_DEGREES = 20  # surface facing within this of a wall direction counts towards that wall
+WALL_SHARE = 0.25  # a 2 cm slice needs this share of the busiest slice's surface to be a wall, not a stray bit
+SHELL_TRIM = 0.06  # metres: splats this close to a wall or the ceiling go, and the clean shell shows there instead
+FLOOR_TRIM = 0.03  # metres: the same for the floor, kept tighter so things standing on it keep their feet
+BLOB = 0.30  # metres: splats wider than this are smears up close, not detail
+FREE_SPACE = 0.08  # metres: splats further than this from the fused surface are floating haze
 # The size MapAnything reads frames at, as pixels on the long side. 0 keeps its own size (518). Smaller frames let more
 # of them into one run on an 8 GB GPU (about 81 at 280 px), so a video needs no parts and no joins.
 INPUT_SIZE = int(os.environ.get("SIGHTSEEN_INPUT_SIZE", "0"))
@@ -361,6 +373,13 @@ def _quaternion(turn):
     return w, x, y, z
 
 
+def _turn(w, x, y, z):
+    """A unit quaternion (w, x, y, z) as a 3 x 3 rotation, the other way round from _quaternion."""
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                     [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                     [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
 def _full_size_lens(lens, seen, original):
     """MapAnything's lens numbers for the original frame instead of the copy it read. That copy was scaled until it
     covered the target size, then cropped in the middle (mapanything.utils.cropping.crop_resize_if_necessary), so
@@ -544,6 +563,247 @@ def _write_splat_data(room, points, colours, folder, frames):
     (sparse / "points3D.txt").write_text("\n".join(lines) + "\n")
 
 
+def write_cameras(out):
+    """cameras.json: where the phone stood for every frame the splats trained on, in three.js axes, so the viewer can
+    walk the video's path (splats only look like the video from near where it was filmed). Read back from splat-data/,
+    so it also works for rooms built before this existed: `python reconstruct.py cameras <request folder>`."""
+    sparse = Path(out) / "splat-data" / "sparse" / "0"
+    lenses = {}
+    for line in (sparse / "cameras.txt").read_text().splitlines():
+        if line and not line.startswith("#"):
+            number, _, width, height, fx, fy, *_ = line.split()
+            lenses[number] = (int(width), int(height), float(fx), float(fy))
+    flip = np.diag([1.0, -1.0, -1.0])  # OpenCV axes to three.js axes, for the room and for the camera alike
+    spots = []
+    for line in (sparse / "images.txt").read_text().splitlines():
+        parts = line.split()
+        if len(parts) != 10 or line.startswith("#"):
+            continue
+        qw, qx, qy, qz, tx, ty, tz = map(float, parts[1:8])
+        to_camera = _turn(qw, qx, qy, qz)  # COLMAP stores the world-to-camera turn
+        position = flip @ (-to_camera.T @ np.array([tx, ty, tz]))
+        turn = flip @ to_camera.T @ flip
+        width, height, fx, fy = lenses[parts[8]]
+        spots.append({
+            "frame": Path(parts[9]).stem,
+            "position": [round(float(v), 4) for v in position],
+            "quaternion": [round(float(v), 6) for v in _quaternion(turn)],  # w, x, y, z
+            "fovX": round(math.degrees(2 * math.atan(width / 2 / fx)), 2),
+            "fovY": round(math.degrees(2 * math.atan(height / 2 / fy)), 2),
+        })
+    spots.sort(key=lambda spot: spot["frame"])
+    (Path(out) / "cameras.json").write_text(json.dumps(spots))
+    return len(spots)
+
+
+def _level(planes):
+    """A floor or ceiling usually comes out as several patches a few cm apart (rugs, noise), so take the patches within
+    LEVEL_SPREAD of the first one, use their height weighted by size, and fit one plane through all their points for
+    the normal. Returns (height, normal, points) like a single plane, or None."""
+    if not planes:
+        return None
+    group = [plane for plane in planes if abs(plane[0] - planes[0][0]) < LEVEL_SPREAD]
+    heights = np.array([plane[0] for plane in group])
+    sizes = np.array([plane[2] for plane in group])
+    order = np.argsort(heights)
+    middle = order[np.searchsorted(np.cumsum(sizes[order]), sizes.sum() / 2)]
+    together = np.concatenate([plane[3] for plane in group])
+    normal = np.linalg.svd(together - together.mean(axis=0), full_matrices=False)[2][2]
+    if normal @ group[0][1] < 0:
+        normal = -normal
+    return float(heights[middle]), normal, int(sizes.sum())
+
+
+def _flat_planes(points, up, rounds=12, min_points=200):
+    """The big flat patches facing up or down (floor, bed, desk, ceiling), one RANSAC plane at a time. Returns
+    (height along up, plane normal, how many points, the points) for each, lowest first."""
+    import open3d as o3d
+
+    o3d.utility.random.seed(0)  # RANSAC picks random points; the same room should give the same floor every time
+    left = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+    planes = []
+    for _ in range(rounds):
+        if len(left.points) < min_points:
+            break
+        (a, b, c, _), inliers = left.segment_plane(distance_threshold=0.02, ransac_n=3, num_iterations=1000)
+        on_plane = np.asarray(left.points)[inliers]
+        normal = np.array([a, b, c]) / np.linalg.norm([a, b, c])
+        if normal @ up < 0:
+            normal = -normal
+        if len(inliers) >= min_points and normal @ up > math.cos(math.radians(PLANE_DEGREES)):
+            planes.append((float(np.median(on_plane @ up)), normal, len(inliers), on_plane))
+        left = left.select_by_index(inliers, invert=True)
+    return sorted(planes, key=lambda plane: plane[0])
+
+
+def write_room_frame(out):
+    """room-frame.json: which way is up and where the floor is, so the viewer can stand the room upright with the floor
+    at height 0 (the room's space is the first frame's camera, which was tilted). Walking on the website and standing
+    in VR both need it. Up comes from the cameras: a phone's sideways axis stays level while it's carried, so up is the
+    direction square to all of them (nerfstudio's "vertical" method). On take 3 that agreed with the ceiling and the
+    bed to 1.5 degrees, better than the floor's own patches did, so the floor only sets the height: the lowest big flat
+    patch facing up. Also the ceiling (the highest one) and how high the phone was held. Three.js axes, metres.
+    `python reconstruct.py frame <request folder>` makes it for older rooms."""
+    import open3d as o3d
+
+    out = Path(out)
+    spots = json.loads((out / "cameras.json").read_text())
+    turns = np.array([_turn(*spot["quaternion"]) for spot in spots])
+    positions = np.array([spot["position"] for spot in spots])
+    up = np.linalg.svd(turns[:, :, 0])[2][2]  # the direction least along any camera's sideways axis
+    if up @ turns[:, :, 1].mean(axis=0) < 0:
+        up = -up
+
+    if (out / "room-surface.ply").exists():
+        mesh = o3d.io.read_triangle_mesh(str(out / "room-surface.ply"))
+        mesh.compute_vertex_normals()
+        points, normals = np.asarray(mesh.vertices), np.asarray(mesh.vertex_normals)
+    else:
+        cloud = o3d.io.read_point_cloud(str(out / "room.ply"))
+        cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.05, max_nn=30))
+        points, normals = np.asarray(cloud.points), np.asarray(cloud.normals)
+    flat = np.abs(normals @ up) > math.cos(math.radians(FLAT_DEGREES))
+    planes = _flat_planes(points[flat], up)
+    held = float(np.median(positions @ up))  # the phone's height, in the room's own space
+    below = [plane for plane in planes if plane[0] < held]
+    above = [plane for plane in planes if plane[0] > held]
+
+    floor = _level(below)
+    ceiling = _level(above[::-1])
+    floor_height = floor[0] if floor else float(np.percentile(points @ up, 2))
+    ceiling_height = ceiling[0] if ceiling else None
+
+    ahead = turns[0] @ np.array([0.0, 0.0, -1.0])  # where the first frame looked, kept as "straight ahead"
+    ahead -= (ahead @ up) * up
+    ahead /= np.linalg.norm(ahead)
+    level = np.array([np.cross(ahead, up), up, -ahead])  # rows: the upright room's x (right), y (up), z (back)
+    eye = held - floor_height
+    frame = {
+        "quaternion": [round(float(v), 6) for v in _quaternion(level)],  # w, x, y, z
+        "floorHeight": round(floor_height, 4),  # along up, in the room's own space; the viewer moves it to 0
+        "eyeHeight": round(eye, 3),
+        "ceilingHeight": round(ceiling_height - floor_height, 3) if ceiling_height is not None else None,
+        "floorFound": floor is not None,
+        "floorPoints": floor[2] if floor else 0,
+        # How far the floor's own fitted plane leans from the cameras' up: a check, not used
+        "floorTiltDegrees": round(math.degrees(math.acos(min(1.0, float(floor[1] @ up)))), 2) if floor else None,
+        "trusted": floor is not None and MIN_EYE <= eye <= MAX_EYE,
+    }
+    (out / "room-frame.json").write_text(json.dumps(frame, indent=2))
+    return frame
+
+
+def _wall_at(along, side):
+    """Where a wall sits along one of the room's axes: walls are the outermost big vertical surfaces, so it's the
+    outermost 2 cm slice (on that side) holding at least WALL_SHARE of the busiest slice's surface, refined to the
+    median of the points within 3 cm of it. Furniture fronts sit further in and are passed over."""
+    slices = np.arange(along.min(), along.max() + 0.02, 0.02)
+    counts, edges = np.histogram(along, bins=slices)
+    busy = np.nonzero(counts >= WALL_SHARE * counts.max())[0]
+    k = busy[-1] if side > 0 else busy[0]
+    middle = (edges[k] + edges[k + 1]) / 2
+    return float(np.median(along[np.abs(along - middle) < 0.03]))
+
+
+def write_room_shell(out):
+    """room-shell.json: the room's shell (four walls, floor and ceiling) as a box, found in the upright room, so the
+    viewer can draw clean walls where nobody filmed them up close, hide what lies beyond them, and keep a walker
+    inside. The furniture and everything filmed stay as the real splats. The walls' directions come from the surface
+    that faces sideways (most of it is wall, and walls meet at right angles, so the angle that best fits all of them
+    on a 90-degree turn wins); each wall's colour is the median of the surface on it.
+    `python reconstruct.py shell <request folder>` makes it for older rooms. Needs room-frame.json."""
+    import open3d as o3d
+
+    out = Path(out)
+    frame = json.loads((out / "room-frame.json").read_text())
+    level = _turn(*frame["quaternion"])
+    mesh = o3d.io.read_triangle_mesh(str(out / "room-surface.ply"))
+    mesh.compute_vertex_normals()
+    points = np.asarray(mesh.vertices) @ level.T - np.array([0.0, frame["floorHeight"], 0.0])  # upright, floor at 0
+    normals = np.asarray(mesh.vertex_normals) @ level.T
+    colours = np.asarray(mesh.vertex_colors)
+
+    sideways = np.abs(normals[:, 1]) < math.sin(math.radians(FLAT_DEGREES))
+    turn = np.arctan2(normals[sideways, 2], normals[sideways, 0])
+    yaw = float(np.angle(np.exp(4j * turn).mean()) / 4)  # the walls' direction, on a 90-degree turn
+    axes = [np.array([math.cos(yaw), 0.0, math.sin(yaw)]), np.array([-math.sin(yaw), 0.0, math.cos(yaw)])]
+    height = frame["ceilingHeight"] or float(np.percentile(points[:, 1], 99))
+
+    walls, faces = [], {}
+    for axis, names in zip(axes, (("left", "right"), ("front", "back"))):
+        facing = sideways & (np.abs(normals @ axis) > math.cos(math.radians(WALL_DEGREES)))
+        along = points[facing] @ axis
+        for side, name in zip((-1, 1), names):
+            at = _wall_at(along, side)
+            near = facing & (np.abs(points @ axis - at) < 0.05)
+            walls.append(at)
+            faces[name] = [int(v) for v in np.median(colours[near], axis=0) * 255] if near.any() else [200, 200, 200]
+    floor = (points[:, 1] < 0.05) & (normals[:, 1] > math.cos(math.radians(FLAT_DEGREES)))
+    ceiling = (points[:, 1] > height - 0.05) & (normals[:, 1] < -math.cos(math.radians(FLAT_DEGREES)))
+    faces["floor"] = [int(v) for v in np.median(colours[floor], axis=0) * 255] if floor.any() else [150, 150, 150]
+    faces["ceiling"] = [int(v) for v in np.median(colours[ceiling], axis=0) * 255] if ceiling.any() else [230, 230, 230]
+
+    width, length = walls[1] - walls[0], walls[3] - walls[2]
+    centre = axes[0] * (walls[0] + walls[1]) / 2 + axes[1] * (walls[2] + walls[3]) / 2 + np.array([0, height / 2, 0])
+    shell = {
+        "centre": [round(float(v), 4) for v in centre],
+        "size": [round(width, 3), round(height, 3), round(length, 3)],  # along the walls' x, up, along their z
+        "yawDegrees": round(math.degrees(yaw), 2),
+        "faces": faces,  # RGB 0-255: left and right walls (x), front and back (z), floor, ceiling
+    }
+    (out / "room-shell.json").write_text(json.dumps(shell, indent=2))
+    return shell
+
+
+def trim_splats(out):
+    """Leaves the splats only what isn't the shell. Drops the ones beyond the walls, floor and ceiling (smears that
+    training pushed out of the room), the ones within SHELL_TRIM of them (the shell draws those surfaces, clean, and
+    seen up close a filmed wall's splats are the smear), and blobs wider than BLOB (they smear when you walk close).
+    The untrimmed splats stay as room-splats-full.ply. Needs room-frame.json and room-shell.json.
+    `python reconstruct.py trim <request folder>` trims an older room."""
+    out = Path(out)
+    full = out / "room-splats-full.ply"
+    if not full.exists():
+        shutil.copyfile(out / "room-splats.ply", full)
+    data = full.read_bytes()
+    end = data.index(b"end_header\n") + len(b"end_header\n")
+    header = data[:end].decode("ascii")
+    properties = [line.split() for line in header.splitlines() if line.startswith("property")]
+    if any(kind != "float" for _, kind, _ in properties):
+        raise ValueError("room-splats-full.ply has non-float properties; this reader only knows Brush's layout")
+    column = {name: k for k, (_, _, name) in enumerate(properties)}
+    splats = np.frombuffer(data, dtype=np.float32, offset=end).reshape(-1, len(properties))
+
+    frame = json.loads((out / "room-frame.json").read_text())
+    shell = json.loads((out / "room-shell.json").read_text())
+    level = _turn(*frame["quaternion"])
+    centres = splats[:, [column["x"], column["y"], column["z"]]] * np.array([1.0, -1.0, -1.0])  # OpenCV to three.js
+    upright = centres @ level.T - np.array([0.0, frame["floorHeight"], 0.0])
+    yaw = math.radians(shell["yawDegrees"])
+    offset = upright - np.array(shell["centre"])
+    across = offset @ np.array([math.cos(yaw), 0.0, math.sin(yaw)])
+    along = offset @ np.array([-math.sin(yaw), 0.0, math.cos(yaw)])
+    width, height, length = shell["size"]
+    inside = ((np.abs(across) < width / 2 - SHELL_TRIM) & (np.abs(along) < length / 2 - SHELL_TRIM)
+              & (upright[:, 1] > FLOOR_TRIM) & (upright[:, 1] < height - SHELL_TRIM))
+    widest = np.exp(splats[:, [column["scale_0"], column["scale_1"], column["scale_2"]]]).max(axis=1)
+    # Real things have a surface, and the fused surface has every spot the frames' depth agreed on. Splats floating
+    # further than FREE_SPACE from it are haze: training's way of explaining views, which looks like fog in between.
+    import open3d as o3d
+
+    surface = o3d.io.read_triangle_mesh(str(out / "room-surface.ply"))
+    gap = np.asarray(o3d.geometry.PointCloud(o3d.utility.Vector3dVector(centres.astype(np.float64)))
+                     .compute_point_cloud_distance(o3d.geometry.PointCloud(surface.vertices)))
+    floating = gap > FREE_SPACE
+    keep = inside & (widest < BLOB) & ~floating
+
+    count = int(keep.sum())
+    trimmed = header.replace(f"element vertex {len(splats)}\n", f"element vertex {count}\n").encode("ascii")
+    (out / "room-splats.ply").write_bytes(trimmed + splats[keep].tobytes())
+    return {"kept": count, "outsideOrOnShell": int((~inside).sum()), "blobs": int((inside & (widest >= BLOB)).sum()),
+            "floating": int((inside & (widest < BLOB) & floating).sum())}
+
+
 def _train_splats(out):
     """Gaussian splats with Brush: lots of small coloured blobs, adjusted until the room seen from each camera looks
     like that frame, so the room looks like the video. Trains on splat-data/, writes room-splats.ply and a log, and
@@ -660,9 +920,16 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
         points, colours = points[chosen], colours[chosen]
     filled = int(len(np.unique(_cells(points, CUBE))))
     _write_splat_data(room, points, colours, out / "splat-data", frames)
+    write_cameras(out)
     room.clear()
     points = points * np.array([1.0, -1.0, -1.0], dtype=np.float32)  # OpenCV axes to three.js axes
     write_ply(out / "room.ply", points, colours)
+    try:
+        room_frame = write_room_frame(out)
+        room_frame["shell"] = write_room_shell(out)
+    except Exception as error:  # noqa: BLE001 - the room still opens, just as filmed (tilted, no shell), without it
+        traceback.print_exc()
+        room_frame = {"error": f"{type(error).__name__}: {error}"}
 
     # A box around the 3D along the first frame's axes, ignoring the 2% of stray points at each end.
     # It's not the room's walls (those aren't lined up with the camera); the viewer's measuring tool is for that.
@@ -671,12 +938,19 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
 
     stage("making it look like the video (a few minutes)")
     (out / "room-splats.ply").unlink(missing_ok=True)  # a failed run mustn't leave an older room's splats behind
+    (out / "room-splats-full.ply").unlink(missing_ok=True)  # nor an older untrimmed copy for trim_splats to read
     try:
         splat_seconds = _train_splats(out)
         splats, splats_error = "room-splats.ply", None
     except Exception as error:  # noqa: BLE001 - the surface and dots still work, so failed splats don't fail the room
         traceback.print_exc()
         splat_seconds, splats, splats_error = None, None, f"{type(error).__name__}: {error}"
+    if splats and "shell" in room_frame:
+        try:
+            room_frame["trim"] = trim_splats(out)
+        except Exception as error:  # noqa: BLE001 - the untrimmed splats still work
+            traceback.print_exc()
+            room_frame["trim"] = {"error": f"{type(error).__name__}: {error}"}
 
     result = {
         "frames": len(frames),
@@ -700,6 +974,7 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
         "model": model_key,
         "joins": joins,
         "cameras": cameras,
+        "roomFrame": room_frame,
     }
     (out / "result.json").write_text(json.dumps(result, indent=2))
     return result
@@ -715,3 +990,18 @@ def explain(error):
     if isinstance(error, (ValueError, FileNotFoundError)):
         return str(error)
     return f"The 3D step failed: {type(error).__name__}: {error}"
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) == 3 and sys.argv[1] == "cameras":
+        print(write_cameras(sys.argv[2]), "camera spots written")
+    elif len(sys.argv) == 3 and sys.argv[1] == "frame":
+        print(json.dumps(write_room_frame(sys.argv[2]), indent=2))
+    elif len(sys.argv) == 3 and sys.argv[1] == "shell":
+        print(json.dumps(write_room_shell(sys.argv[2]), indent=2))
+    elif len(sys.argv) == 3 and sys.argv[1] == "trim":
+        print(json.dumps(trim_splats(sys.argv[2]), indent=2))
+    else:
+        sys.exit("usage: python reconstruct.py cameras|frame|shell|trim <request folder>")

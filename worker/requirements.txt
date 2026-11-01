@@ -8,3 +8,5 @@ pycolmap==4.2.1
 # Open3D (installed by setup.sh on its own, without its notebook extras) imports these two when it starts
 plotly==7.1.0
 dash==4.5.0
+# Meta's parser for SAM 3.1's answers (SAM License): decodes the masks for the Walk look's furniture
+meta-sam-parser==0.1.0

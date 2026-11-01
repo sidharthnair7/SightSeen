@@ -17,6 +17,8 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** The student's side: start a request, watch it, and open the 3D room. */
 @RestController
@@ -71,6 +73,60 @@ class RequestController {
     ResponseEntity<Resource> splats(@PathVariable String id) {
         RoomRequest r = service.byId(id);
         return ply(files.splatsFile(r.getId()), "This room has no splats. Build it again to make them.");
+    }
+
+    @GetMapping("/{id}/cameras.json")
+    ResponseEntity<Resource> cameras(@PathVariable String id) {
+        RoomRequest r = service.byId(id);
+        return json(files.camerasFile(r.getId()), "This room has no camera path. Build it again to make one.");
+    }
+
+    @GetMapping("/{id}/room-frame.json")
+    ResponseEntity<Resource> roomFrame(@PathVariable String id) {
+        RoomRequest r = service.byId(id);
+        return json(files.roomFrameFile(r.getId()), "This room doesn't know where its floor is. Build it again to find it.");
+    }
+
+    @GetMapping("/{id}/room-shell.json")
+    ResponseEntity<Resource> roomShell(@PathVariable String id) {
+        RoomRequest r = service.byId(id);
+        return json(files.roomShellFile(r.getId()), "This room has no walls found yet. Build it again to find them.");
+    }
+
+    @GetMapping("/{id}/room-objects.json")
+    ResponseEntity<Resource> roomObjects(@PathVariable String id) {
+        RoomRequest r = service.byId(id);
+        return json(files.roomObjectsFile(r.getId()), "This room's furniture hasn't been found yet.");
+    }
+
+    /**
+     * The room's other generated files (wall textures, furniture) by name, so new ones need no new endpoint. A name is
+     * lowercase letters, digits and dashes with one known extension: no folders, and never the landlord's video.
+     */
+    @GetMapping("/{id}/assets/{name:.+}")
+    ResponseEntity<Resource> asset(@PathVariable String id, @PathVariable String name) {
+        RoomRequest r = service.byId(id);
+        Matcher match = ASSET.matcher(name);
+        Path file = files.assetFile(r.getId(), name);
+        if (!match.matches() || !Files.exists(file)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "This room has no file called " + name + ".");
+        }
+        MediaType type = switch (match.group(1)) {
+            case "json" -> MediaType.APPLICATION_JSON;
+            case "png" -> MediaType.IMAGE_PNG;
+            case "jpg" -> MediaType.IMAGE_JPEG;
+            default -> MediaType.APPLICATION_OCTET_STREAM;
+        };
+        return ResponseEntity.ok().contentType(type).body(new FileSystemResource(file));
+    }
+
+    private static final Pattern ASSET = Pattern.compile("[a-z0-9][a-z0-9-]*\\.(json|png|jpg|ply)");
+
+    private static ResponseEntity<Resource> json(Path file, String missing) {
+        if (!Files.exists(file)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, missing);
+        }
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(new FileSystemResource(file));
     }
 
     private static ResponseEntity<Resource> ply(Path file, String missing) {
