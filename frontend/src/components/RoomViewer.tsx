@@ -132,6 +132,8 @@ export default function RoomViewer({ url }: { url: string }) {
     // Turning happens in place, like standing in the room: the controls orbit a point 1 cm ahead, so the camera stays
     // where it is instead of swinging round into places no frame was filmed from. The wheel walks forward and back.
     const controls = new OrbitControls(camera, renderer.domElement)
+    // In development only: the camera and scene on window, so a browser console can check where the viewer stands
+    if (import.meta.env.DEV) Object.assign(window, { sightseen: { camera, controls, scene } })
     controls.enableDamping = true
     controls.enableZoom = false
     controls.rotateSpeed = -0.35 // drag the room the way you'd turn your head
@@ -159,7 +161,8 @@ export default function RoomViewer({ url }: { url: string }) {
     // The room as filmed is tilted: its space is the first frame's camera. room-frame.json says which way is up and
     // where the floor is, so everything goes in one group that stands the room upright with the floor at height 0
     // (walking and VR both need that). Marks stay outside it: they're placed where the clicks hit, already upright.
-    const assets = url.replace('/room.ply', '/assets/') // the room's other generated files, by name
+    // The room's other generated files, by name (the room's URL may carry a ?v= version after room.ply; drop it here)
+    const assets = url.split('?')[0].replace('/room.ply', '/assets/')
     const room = new THREE.Group()
     scene.add(room)
 
