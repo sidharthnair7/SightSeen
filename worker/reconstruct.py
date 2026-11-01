@@ -68,6 +68,11 @@ HAND_OVER_POSES = os.environ.get("SIGHTSEEN_HAND_OVER", "1") != "0"
 USE_COLMAP = os.environ.get("SIGHTSEEN_COLMAP", "1") != "0"
 COLMAP_MIN_SHARE = 0.5
 COLMAP_MAX_SIDE = 1024  # COLMAP finds features on a copy at most this big, so a 4K video stays quick on the CPU
+# Frames COLMAP couldn't place go back in with MapAnything's camera lined up on their neighbours', so blank walls and
+# fast turns aren't left black. SIGHTSEEN_ADD_BACK=0 leaves them out.
+ADD_BACK = os.environ.get("SIGHTSEEN_ADD_BACK", "1") != "0"
+ADD_BACK_NEIGHBOURS = 8  # placed frames nearest in the video, used to line each one up
+ADD_BACK_MAX_GAP = 0.15  # metres: neighbours lining up worse than this means MapAnything's camera can't be trusted
 # The size MapAnything reads frames at, as pixels on the long side. 0 keeps its own size (518). Smaller frames let more
 # of them into one run on an 8 GB GPU (about 81 at 280 px), so a video needs no parts and no joins.
 INPUT_SIZE = int(os.environ.get("SIGHTSEEN_INPUT_SIZE", "0"))
@@ -452,7 +457,10 @@ def _use_colmap(room, model, frames):
                           (camera.width, camera.height))
         changes[i] = (camera_to_room, lens, metres / ratios[i] if i in ratios else 1.0)
 
-    left_out = [i for i in room if i not in placed]
+    unplaced = [i for i in room if i not in placed]
+    back = _add_back(room, changes, unplaced) if ADD_BACK else {}
+    changes.update(back)
+    left_out = [i for i in unplaced if i not in back]
     for i in left_out:
         del room[i]
     for i, (camera_to_room, lens, fix) in changes.items():
@@ -464,10 +472,37 @@ def _use_colmap(room, model, frames):
         f["pts"] = (in_camera @ camera_to_room[:3, :3].T + camera_to_room[:3, 3]).astype(np.float32)
         f["pose"], f["lens"] = camera_to_room, lens
     fixes = np.array([metres / ratio for ratio in ratios.values()])
-    return {"used": "colmap", "framesPlaced": len(placed), "framesLeftOut": len(left_out),
+    return {"used": "colmap", "framesPlaced": len(placed), "framesAddedBack": len(back), "framesLeftOut": len(left_out),
             "errorPx": round(model.compute_mean_reprojection_error(), 3), "points": model.num_points3D(),
             "metresPerUnit": round(metres, 4),
             "depthFix": [round(float(np.percentile(fixes, 10)), 3), round(float(np.percentile(fixes, 90)), 3)]}
+
+
+def _add_back(room, changes, unplaced):
+    """COLMAP can't place frames of a blank wall or a fast blurred turn (on take 3: the door wall and the turn after
+    it, 18 of 81 frames), and leaving them out leaves that side of the room black. Each one goes back with
+    MapAnything's camera, moved onto COLMAP's by the resize, turn and move that best line up the nearest placed frames'
+    two sets of cameras (their positions, and spots 1 m ahead and 1 m below them so the turn is pinned down too).
+    Its lens is COLMAP's (one phone, one lens). Frames whose neighbours line up worse than ADD_BACK_MAX_GAP stay out.
+    Returns frame number -> (camera_to_room, lens, depth resize), like the placed frames' changes."""
+    placed = sorted(changes)
+    if not placed:
+        return {}
+    marks = np.array([[0, 0, 0, 1], [0, 0, 1, 1], [0, 1, 0, 1]], dtype=np.float64).T  # the camera, ahead, below
+    back = {}
+    for i in unplaced:
+        nearest = sorted(placed, key=lambda j: abs(j - i))[:ADD_BACK_NEIGHBOURS]
+        src = np.concatenate([(room[j]["pose"].astype(np.float64) @ marks)[:3].T for j in nearest])
+        dst = np.concatenate([(changes[j][0].astype(np.float64) @ marks)[:3].T for j in nearest])
+        resize, turn, move = _umeyama(src, dst, np.ones(len(src)))
+        gap = float(np.median(np.linalg.norm(resize * src @ turn.T + move - dst, axis=1)))
+        if gap > ADD_BACK_MAX_GAP:
+            continue
+        camera_to_room = np.eye(4, dtype=np.float32)
+        camera_to_room[:3, :3] = turn @ room[i]["pose"][:3, :3]
+        camera_to_room[:3, 3] = resize * turn @ room[i]["pose"][:3, 3] + move
+        back[i] = (camera_to_room, changes[nearest[0]][1], resize)
+    return back
 
 
 def _write_splat_data(room, points, colours, folder, frames):

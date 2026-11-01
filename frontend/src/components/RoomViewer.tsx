@@ -6,6 +6,7 @@ import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark'
 import { Ruler, X } from 'lucide-react'
 
 const MARK = '#f59e0b'
+const WALK_STEP = 0.1 // metres per scroll notch
 
 type Look = 'real' | 'solid' | 'dots'
 
@@ -35,7 +36,7 @@ function pick(look: Look, hasSplats: boolean, hasSurface: boolean): Look {
 
 /**
  * The 3D room: "Real" is Gaussian splats trained to look like the video, "Solid" the surface, "Dots" the points.
- * Older rooms may only have some of them. Drag to turn, scroll to zoom, right-drag to move. A click (not a drag) on
+ * Older rooms may only have some of them. Drag to look around (in place), scroll to walk, right-drag to step sideways. A click (not a drag) on
  * the room drops a marker; two markers give the straight-line distance between them. Measuring always hits the solid
  * surface when there is one, even in the Real look, because a surface gives a steadier point than a blurry splat.
  * In the dots look, the dot-size slider makes the points bigger, so the room looks less see-through.
@@ -94,8 +95,21 @@ export default function RoomViewer({ url }: { url: string }) {
     scene.background = new THREE.Color('#10161a')
     const camera = new THREE.PerspectiveCamera(60, el.clientWidth / el.clientHeight, 0.01, 1000)
     camera.position.set(0, 0.5, 2)
+    // Turning happens in place, like standing in the room: the controls orbit a point 1 cm ahead, so the camera stays
+    // where it is instead of swinging round into places no frame was filmed from. The wheel walks forward and back.
     const controls = new OrbitControls(camera, renderer.domElement)
     controls.enableDamping = true
+    controls.enableZoom = false
+    controls.rotateSpeed = -0.35 // drag the room the way you'd turn your head
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      const ahead = new THREE.Vector3()
+      camera.getWorldDirection(ahead)
+      ahead.multiplyScalar(-Math.sign(e.deltaY) * WALK_STEP)
+      camera.position.add(ahead)
+      controls.target.add(ahead)
+    }
+    renderer.domElement.addEventListener('wheel', onWheel, { passive: false })
 
     const raycaster = new THREE.Raycaster()
     raycaster.params.Points = { threshold: 0.02 }
@@ -146,7 +160,7 @@ export default function RoomViewer({ url }: { url: string }) {
       scene.add(cloud)
       // Start exactly where the video began (the room's origin is the first frame's camera, looking down -z): splats
       // only look like the video from where it was filmed, and it's the view the student already knows
-      controls.target.set(0, 0, -1)
+      controls.target.set(0, 0, -0.01)
       camera.position.set(0, 0, 0)
       camera.near = Math.max(0.001, sphere.radius / 1000)
       camera.far = sphere.radius * 50
@@ -222,6 +236,7 @@ export default function RoomViewer({ url }: { url: string }) {
       resize.disconnect()
       renderer.domElement.removeEventListener('pointerdown', onDown)
       renderer.domElement.removeEventListener('pointerup', onUp)
+      renderer.domElement.removeEventListener('wheel', onWheel)
       controls.dispose()
       cloud?.geometry.dispose()
       material.current?.dispose()
@@ -265,7 +280,7 @@ export default function RoomViewer({ url }: { url: string }) {
         </button>
       )}
       <p className="pointer-events-none absolute bottom-3 left-3 text-xs text-white/70">
-        Drag to turn, scroll to zoom, right-drag to move.
+        Drag to look around, scroll to walk, right-drag to step sideways.
       </p>
       {state === 'ready' && (
         <div className="absolute bottom-3 right-3 flex items-center gap-2">
