@@ -1,7 +1,6 @@
 """One SAM 3.1 call through the Meta Model API, to see whether the key and credits work.
 
-Usage (PowerShell, key set by you first):
-    $env:MODEL_API_KEY = "<your key>"
+Usage (key in the repo's .env as MODEL_API_KEY=..., or set in the terminal):
     python worker\\sam_check.py <image.jpg> "door"
 
 Costs one image: $2.50 per 1,000 images, so a quarter of a cent.
@@ -16,15 +15,27 @@ import urllib.request
 from pathlib import Path
 
 API = "https://api.meta.ai/v1/responses"
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
+def load_env():
+    """Fill os.environ from the repo's .env, without overriding what the terminal already set."""
+    if not ENV_FILE.exists():
+        return
+    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        name, sep, value = line.partition("=")
+        if sep and not name.strip().startswith("#") and value.strip():
+            os.environ.setdefault(name.strip(), value.strip().strip('"'))
 
 
 def main():
     if len(sys.argv) != 3:
         sys.exit("usage: python worker/sam_check.py <image.jpg> <phrase>")
     image, phrase = Path(sys.argv[1]), sys.argv[2]
+    load_env()
     key = os.environ.get("MODEL_API_KEY")
     if not key:
-        sys.exit("MODEL_API_KEY isn't set in this terminal")
+        sys.exit("MODEL_API_KEY isn't set: put it in .env or in this terminal")
 
     data_url = "data:image/jpeg;base64," + base64.b64encode(image.read_bytes()).decode()
     body = {
