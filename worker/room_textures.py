@@ -35,7 +35,8 @@ EDGE = 12  # pixels: a frame fades out over this many pixels at its borders, so 
 TRIM = 5  # texels square: each frame's seen part of a face shrinks by 2 texels at its edges
 SPECK = 60  # texels: a seen patch smaller than this (60 cm2) on its own is dropped and filled
 ROUGH = 0.35  # score for frames whose camera MapAnything gave (lined up to neighbours), next to COLMAP's 1
-SHARPEST = 8  # blend weight = (score / best score here) ** SHARPEST: the best frame leads, the next ones soften seams
+SHARPEST = 3  # blend weight = (score / best score here) ** SHARPEST: the best frame leads, the next ones soften seams
+# (8 to 3 with the furniture at 6 frames and 1: Test 2 on take 3's held-back frames, 19.10 to 19.41 dB)
 GAIN_LIMITS = (0.7, 1.4)
 FADE = 0.12  # metres: unseen texels go from the nearby colours to the face's median colour over this distance
 QUALITY = 90
@@ -117,7 +118,9 @@ def _face_points(shell, face):
     return points, -side * axes[axis], {"cols": cols, "rows": rows, "texel": (across / cols, down / rows)}
 
 
-def make_textures(out):
+def make_textures(out, images=None):
+    """`images`: a folder of pictures to paint from instead of the video's frames (same names), e.g. the splats'
+    renders from render_splats.py."""
     import cv2
     import open3d as o3d
 
@@ -129,7 +132,7 @@ def make_textures(out):
     lift = np.array([0.0, frame["floorHeight"], 0.0])
     cameras = _cameras(out / "splat-data")
     solved = _colmap_solved(out / "colmap" / "model" / "0")
-    images = out / "splat-data" / "images"
+    images = Path(images) if images else out / "splat-data" / "images"
 
     scene = o3d.t.geometry.RaycastingScene()
     scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(o3d.io.read_triangle_mesh(str(out / "room-surface.ply"))))

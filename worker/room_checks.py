@@ -22,7 +22,9 @@ import base64
 import json
 import math
 import os
+import shlex
 import shutil
+import subprocess
 import sys
 import time
 import urllib.request
@@ -36,6 +38,10 @@ from room_furniture import build_furniture
 from room_objects import _cameras, _outline, _pixels, _records
 from room_textures import FACES, PAD, _colmap_solved, make_textures
 from sam_check import API, load_env
+
+BRUSH = Path(__file__).parent / "vendor" / "brush" / "brush_app.exe"
+SPLAT_STEPS, SPLAT_MAX, SPLAT_SH = 15_000, 500_000, 1  # the same as reconstruct.py's, for a fair held-out build
+WSL_PYTHON = "~/sightseen-gs/.venv/bin/python"  # the gsplat venv in WSL that render_splats.py runs in
 
 HOLD_OUT = 6  # Test 2 holds back every 6th frame (starting with the 4th), about 13 of take 3's 76
 SPARK = "muse-spark-1.3"
@@ -186,9 +192,34 @@ def _ssim(a, b):
     return float((((2 * mu_a * mu_b + c1) * (2 * cov + c2)) / ((mu_a ** 2 + mu_b ** 2 + c1) * (var_a + var_b + c2))).mean())
 
 
-def _held_out_build(out, held):
-    """A copy of the room's inputs without the held-back frames, with the walls and furniture rebuilt from the rest."""
-    check = out / "checks" / "held-out"
+def _wsl_path(path):
+    """C:\\Users\\... as WSL sees it, /mnt/c/Users/..."""
+    path = Path(path).resolve()
+    return f"/mnt/{path.drive[0].lower()}{path.as_posix()[2:]}"
+
+
+def draw_splats(splats, splat_data, out_dir):
+    """The splats drawn from every camera in `splat_data`, into `out_dir` (render_splats.py in WSL's gsplat)."""
+    script = _wsl_path(Path(__file__).parent / "render_splats.py")
+    command = (f"{WSL_PYTHON} {shlex.quote(script)} {shlex.quote(_wsl_path(splats))} "
+               f"{shlex.quote(_wsl_path(splat_data))} {shlex.quote(_wsl_path(out_dir))}")
+    subprocess.run(["wsl.exe", "-e", "bash", "-lc", command], check=True, capture_output=True, text=True)
+
+
+def paint_from_splats(out):
+    """The Walk room's walls and furniture painted from the splats' pictures instead of the video's frames: the
+    splats were fitted to every frame at once, so they share one exposure and drop most of the blur."""
+    out = Path(out)
+    splats = out / "room-splats-full.ply" if (out / "room-splats-full.ply").exists() else out / "room-splats.ply"
+    renders = out / "splat-renders"
+    draw_splats(splats, out / "splat-data", renders)
+    return {"textures": make_textures(out, images=renders), "furniture": build_furniture(out, images=renders)}
+
+
+def _held_out_build(out, held, paint="video"):
+    """A copy of the room's inputs without the held-back frames, with the walls and furniture rebuilt from the rest:
+    painted from the kept video frames, or ("splats") from splats trained on the kept frames only."""
+    check = out / "checks" / f"held-out-{paint}"
     if check.exists():
         shutil.rmtree(check)
     (check / "splat-data" / "sparse" / "0").mkdir(parents=True)
@@ -199,6 +230,7 @@ def _held_out_build(out, held):
     shutil.copyfile(out / "colmap" / "model" / "0" / "images.bin", check / "colmap" / "model" / "0" / "images.bin")
     sparse = out / "splat-data" / "sparse" / "0"
     shutil.copyfile(sparse / "cameras.txt", check / "splat-data" / "sparse" / "0" / "cameras.txt")
+    shutil.copyfile(sparse / "points3D.txt", check / "splat-data" / "sparse" / "0" / "points3D.txt")
     kept = []
     for line in (sparse / "images.txt").read_text().splitlines():
         parts = line.split()
@@ -208,18 +240,26 @@ def _held_out_build(out, held):
             kept += [line, ""]
             shutil.copyfile(out / "splat-data" / "images" / parts[9], check / "splat-data" / "images" / parts[9])
     (check / "splat-data" / "sparse" / "0" / "images.txt").write_text("\n".join(kept) + "\n")
-    make_textures(check)
-    build_furniture(check)
+    images = None
+    if paint == "splats":
+        subprocess.run([str(BRUSH), str(check / "splat-data"), "--total-steps", str(SPLAT_STEPS),
+                        "--max-splats", str(SPLAT_MAX), "--sh-degree", str(SPLAT_SH), "--export-every", str(SPLAT_STEPS),
+                        "--export-path", str(check), "--export-name", "splats-held-out.ply"],
+                       check=True, capture_output=True)
+        images = check / "splat-renders"
+        draw_splats(check / "splats-held-out.ply", check / "splat-data", images)
+    make_textures(check, images=images)
+    build_furniture(check, images=images)
     return check
 
 
-def test_looks_like_the_video(out):
+def test_looks_like_the_video(out, paint="video"):
     """Test 2: the held-back frames against the Walk room drawn from their cameras, and views from the middle."""
     cameras = _cameras(out / "splat-data")
     held = {camera["name"] for k, camera in enumerate(cameras) if k % HOLD_OUT == 3}
     solved = _colmap_solved(out / "colmap" / "model" / "0") or set()
     started = time.perf_counter()
-    walk = WalkRoom(_held_out_build(out, held))
+    walk = WalkRoom(_held_out_build(out, held, paint))
     pictures = out / "checks"
     scores = []
     sheet = []
@@ -239,7 +279,7 @@ def test_looks_like_the_video(out):
                        "torn": round(float((kind == "torn").mean()), 3),
                        "unfilmed": round(float((kind == "unfilmed").mean()), 3)})
         sheet.append(np.hstack([real, drawn]))
-    cv2.imwrite(str(pictures / "test2-held-back.jpg"),
+    cv2.imwrite(str(pictures / f"test2-held-back-{paint}.jpg"),
                 (np.vstack(sheet[:6]) * 255).astype(np.uint8)[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 88])
 
     full = WalkRoom(out)  # the room as built, from where the phone never stood: the middle, eye height, 4 ways

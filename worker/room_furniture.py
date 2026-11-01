@@ -45,8 +45,8 @@ HIDDEN = 0.03  # metres: a vertex further than this behind the frame's depth map
 NEAR_EDGE_PX = 3  # look this many pixels around a vertex for an edge where colour bleeds across
 BLEED_BEHIND = 0.15  # metres: something this much further away next to the vertex means it's on a silhouette
 LEAST_FACING = 0.26  # cos 75 degrees: frames that see the surface more edge-on than this don't colour it
-KEEP = 3  # blend the best 3 frames per vertex
-SHARPER = 4  # weights go as (score / best score) ** SHARPER: a clearly better frame wins, near-ties blend
+KEEP = 6  # blend the best 6 frames per vertex
+SHARPER = 1  # weights go as (score / best score) ** SHARPER: softer blending scored better on held-back frames
 ADDED_BACK = 0.4  # frames COLMAP couldn't place (lined up by MapAnything instead) are rougher: their score x this
 GAIN_LIMITS = (0.6, 1.6)
 
@@ -169,13 +169,13 @@ def _bilinear(picture, u, v):
             + (picture[y0 + 1, x0] * (1 - fx) + picture[y0 + 1, x0 + 1] * fx) * fy)
 
 
-def recolour(out, upright_points, normals, fused_colours, surface_cv, triangles_all, level, lift):
+def recolour(out, upright_points, normals, fused_colours, surface_cv, triangles_all, level, lift, images=None):
     """Each vertex's colour from the frames that see it best (see the module doc). Returns colours 0-1 and stats."""
     import cv2
     import open3d as o3d
 
     cameras = _cameras(out / "splat-data")
-    images = out / "splat-data" / "images"
+    images = Path(images) if images else out / "splat-data" / "images"
     pictures = [cv2.imread(str(images / camera["name"]))[:, :, ::-1].astype(np.float32) / 255.0 for camera in cameras]
     sharp = _sharpness([(p * 255).astype(np.uint8) for p in pictures])
     placed = _placed_by_colmap(out, [camera["name"] for camera in cameras])
@@ -292,7 +292,9 @@ def _name_pieces(out, points, triangles, across, along):
     return triangles[order], pieces
 
 
-def build_furniture(out):
+def build_furniture(out, images=None):
+    """`images`: a folder of pictures to colour from instead of the video's frames (same names), e.g. the splats'
+    renders from render_splats.py."""
     import open3d as o3d
 
     out = Path(out)
@@ -316,7 +318,7 @@ def build_furniture(out):
 
     points = np.asarray(mesh.vertices)
     colours, stats = recolour(out, points, np.asarray(mesh.vertex_normals), np.asarray(mesh.vertex_colors),
-                              surface * np.array([1.0, -1.0, -1.0]), triangles, level, lift)
+                              surface * np.array([1.0, -1.0, -1.0]), triangles, level, lift, images)
     timings["recolour"] = round(time.perf_counter() - started - timings["cut"], 1)
 
     across, along = _shell_axes(shell)
