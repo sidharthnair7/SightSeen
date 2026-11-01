@@ -20,7 +20,7 @@ image = (
     .apt_install("git", "libgl1", "libglib2.0-0", "libgomp1")  # system libraries OpenCV and Open3D load
     .pip_install("torch", "torchvision")
     .pip_install("git+https://github.com/facebookresearch/map-anything.git")
-    .pip_install("opencv-python-headless", "plotly==7.1.0", "dash==4.5.0")
+    .pip_install("opencv-python-headless", "plotly==7.1.0", "dash==4.5.0", "pycolmap==4.2.1")
     .pip_install("open3d==0.20.0", extra_options="--no-deps")
     .env({"HF_HOME": "/models"})
     .add_local_python_source("reconstruct")

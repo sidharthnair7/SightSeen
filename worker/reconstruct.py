@@ -7,6 +7,12 @@ then split into equal parts. Each part is given the whole-video run's camera pos
 it on those frames (the fit is VGGT-Long's, arXiv 2507.16443, Section 3.1). Lining every part up with the same run means errors can't stack up from
 part to part. Every join reports how well it fit.
 
+MapAnything's cameras are then swapped for COLMAP's wherever COLMAP can place the frames (Schönberger and Frahm,
+"Structure-from-Motion Revisited", CVPR 2016): it finds the same small features in many frames and solves every camera
+together, so the views line up to under a pixel. MapAnything's lens and directions drift from frame to frame, and on
+take 3 COLMAP's cameras took the splats from 21.4 to 31.2 dB on frames held back from training. COLMAP has no sense of
+size, so MapAnything's depth still sets the metres; when COLMAP can't place enough frames, MapAnything's cameras stay.
+
 All the frames are then fused into one surface (TSDF fusion: each frame's depth votes into a grid of small cubes, the
 grid keeps the average, and marching cubes pulls out triangles), so the walls are solid instead of dots.
 
@@ -14,6 +20,7 @@ Last, Brush trains Gaussian splats on the frames and those cameras, so the room 
 
 Everything is written into the request's folder, next to the video:
   frames/            the frames MapAnything saw
+  colmap/model/      COLMAP's cameras and points for those frames, in its own units (when it could place them)
   splat-data/        what Brush trains on (COLMAP format, OpenCV axes)
   room-splats.ply    the room as Gaussian splats, in OpenCV axes (x right, y down, z away from the first camera)
   room-surface.ply   the room as a coloured triangle mesh, in metres, in three.js axes (x right, y up, z towards the viewer)
@@ -56,6 +63,11 @@ SPLAT_MAX_SIDE = 1920  # Brush's own --max-resolution: frames for splat training
 # Give each part the whole-video run's camera positions for the frames they share, so MapAnything builds the part to
 # agree with it before it's lined up (on take 3: worst join 8.8 cm down to 3.9). SIGHTSEEN_HAND_OVER=0 turns it off.
 HAND_OVER_POSES = os.environ.get("SIGHTSEEN_HAND_OVER", "1") != "0"
+# COLMAP's cameras in place of MapAnything's (take 3's splats: 21.4 to 31.2 dB on held-back frames). SIGHTSEEN_COLMAP=0
+# keeps MapAnything's, as does COLMAP placing fewer than COLMAP_MIN_SHARE of the frames (it placed 83% of take 3's).
+USE_COLMAP = os.environ.get("SIGHTSEEN_COLMAP", "1") != "0"
+COLMAP_MIN_SHARE = 0.5
+COLMAP_MAX_SIDE = 1024  # COLMAP finds features on a copy at most this big, so a 4K video stays quick on the CPU
 # The size MapAnything reads frames at, as pixels on the long side. 0 keeps its own size (518). Smaller frames let more
 # of them into one run on an 8 GB GPU (about 81 at 280 px), so a video needs no parts and no joins.
 INPUT_SIZE = int(os.environ.get("SIGHTSEEN_INPUT_SIZE", "0"))
@@ -356,6 +368,108 @@ def _full_size_lens(lens, seen, original):
                      [0, 0, 1]])
 
 
+def _seen_lens(lens, seen, original):
+    """The other way round: lens numbers for the original frame, made to fit the copy MapAnything read."""
+    scale = max(seen[0] / original[0], seen[1] / original[1])
+    crop_x = (original[0] * scale - seen[0]) / 2
+    crop_y = (original[1] * scale - seen[1]) / 2
+    return np.array([[lens[0, 0] * scale, 0, lens[0, 2] * scale - crop_x],
+                     [0, lens[1, 1] * scale, lens[1, 2] * scale - crop_y],
+                     [0, 0, 1]], dtype=np.float32)
+
+
+def _solve_cameras(frames, indices, folder):
+    """COLMAP on the frames: small features found in each frame and matched across every pair, then every camera solved
+    together (incremental structure from motion), all with one lens since it's one phone. Returns COLMAP's biggest
+    model, or None when it couldn't start one."""
+    import pycolmap
+
+    if folder.exists():
+        shutil.rmtree(folder)
+    (folder / "model").mkdir(parents=True)
+    database = folder / "database.db"
+    images = Path(frames[0]).parent
+    reader = pycolmap.ImageReaderOptions()
+    reader.camera_model = "PINHOLE"  # the camera Brush trains with
+    extraction = pycolmap.FeatureExtractionOptions()
+    extraction.max_image_size = COLMAP_MAX_SIDE
+    pycolmap.extract_features(database, images, image_names=[Path(frames[i]).name for i in indices],
+                              camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
+                              extraction_options=extraction)
+    pycolmap.match_exhaustive(database)
+    models = pycolmap.incremental_mapping(database, images, folder / "model")
+    try:
+        database.unlink()  # the matches: tens of MB nobody reads again
+    except OSError:
+        pass
+    return max(models.values(), key=lambda model: model.num_reg_images()) if models else None
+
+
+def _use_colmap(room, model, frames):
+    """Swaps MapAnything's cameras for COLMAP's in every frame COLMAP placed, and leaves out the frames it didn't (their
+    cameras would disagree). COLMAP has no sense of size, so each frame's MapAnything depth is compared with the depth
+    of COLMAP's points seen in that frame: the median ratio over all frames turns COLMAP's units into metres, and each
+    frame's own ratio corrects that frame's depth, so every depth agrees with COLMAP's cameras. The room's space stays
+    the first placed frame's camera, in metres. Returns the numbers; the room is only changed when "used" is "colmap"."""
+    names = {Path(frames[i]).name: i for i in room}
+    placed = {names[image.name]: image for image in model.images.values() if image.has_pose and image.name in names}
+    if len(placed) < COLMAP_MIN_SHARE * len(room):
+        return {"used": "mapanything", "reason": f"COLMAP placed only {len(placed)} of {len(room)} frames"}
+
+    ratios = {}  # frame number -> MapAnything's depth / COLMAP's depth at COLMAP's points
+    for i, image in placed.items():
+        seen = [(p.xy, p.point3D_id) for p in image.points2D if p.has_point3D()]
+        if len(seen) < 20:
+            continue
+        pose, camera, depth = image.cam_from_world(), model.cameras[image.camera_id], room[i]["depth"]
+        xyz = np.array([model.points3D[point].xyz for _, point in seen])
+        far = xyz @ pose.rotation.matrix()[2] + pose.translation[2]
+        height, width = depth.shape
+        scale = max(width / camera.width, height / camera.height)
+        u = np.floor(np.array([xy[0] for xy, _ in seen]) * scale - (camera.width * scale - width) / 2).astype(int)
+        v = np.floor(np.array([xy[1] for xy, _ in seen]) * scale - (camera.height * scale - height) / 2).astype(int)
+        inside = (u >= 0) & (u < width) & (v >= 0) & (v < height) & (far > 0)
+        u, v, far = u[inside], v[inside], far[inside]
+        good = room[i]["trusted"][v, u]
+        if good.sum() >= 20:
+            ratios[i] = float(np.median(depth[v[good], u[good]] / far[good]))
+    if not ratios:
+        return {"used": "mapanything", "reason": "no COLMAP points landed on MapAnything's depth"}
+    metres = float(np.median(list(ratios.values())))  # metres per COLMAP unit
+
+    first = placed[min(placed)].cam_from_world()
+    first_turn, first_shift = first.rotation.matrix(), np.asarray(first.translation)
+    changes = {}
+    for i, image in placed.items():
+        pose, camera = image.cam_from_world(), model.cameras[image.camera_id]
+        turn = pose.rotation.matrix()
+        camera_to_room = np.eye(4, dtype=np.float32)
+        camera_to_room[:3, :3] = first_turn @ turn.T
+        camera_to_room[:3, 3] = metres * (first_turn @ (-turn.T @ np.asarray(pose.translation)) + first_shift)
+        fx, fy, cx, cy = camera.params
+        height, width = room[i]["depth"].shape
+        lens = _seen_lens(np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]]), (width, height),
+                          (camera.width, camera.height))
+        changes[i] = (camera_to_room, lens, metres / ratios[i] if i in ratios else 1.0)
+
+    left_out = [i for i in room if i not in placed]
+    for i in left_out:
+        del room[i]
+    for i, (camera_to_room, lens, fix) in changes.items():
+        f = room[i]
+        f["depth"] = (f["depth"] * fix).astype(np.float32)
+        rows, cols = np.indices(f["depth"].shape)
+        in_camera = np.stack([(cols - lens[0, 2]) / lens[0, 0] * f["depth"],
+                              (rows - lens[1, 2]) / lens[1, 1] * f["depth"], f["depth"]], axis=-1)
+        f["pts"] = (in_camera @ camera_to_room[:3, :3].T + camera_to_room[:3, 3]).astype(np.float32)
+        f["pose"], f["lens"] = camera_to_room, lens
+    fixes = np.array([metres / ratio for ratio in ratios.values()])
+    return {"used": "colmap", "framesPlaced": len(placed), "framesLeftOut": len(left_out),
+            "errorPx": round(model.compute_mean_reprojection_error(), 3), "points": model.num_points3D(),
+            "metresPerUnit": round(metres, 4),
+            "depthFix": [round(float(np.percentile(fixes, 10)), 3), round(float(np.percentile(fixes, 90)), 3)]}
+
+
 def _write_splat_data(room, points, colours, folder, frames):
     """Writes what a Gaussian splat trainer (Brush) starts from, in COLMAP's text format: every frame at its original
     size (more detail than MapAnything's smaller copy), each camera's lens and position, and the room's points as the
@@ -476,6 +590,21 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
         room.update(part)  # a part's own copy of a shared frame replaces the whole-video run's
     peak_gb = torch.cuda.max_memory_allocated() / 1e9 if DEVICE == "cuda" else None
 
+    cameras = {"used": "mapanything"}
+    if USE_COLMAP:
+        stage("lining up the cameras precisely (COLMAP)")
+        started = time.perf_counter()
+        try:
+            model = _solve_cameras(frames, sorted(room), out / "colmap")
+            if model is None:
+                cameras = {"used": "mapanything", "reason": "COLMAP couldn't start a model"}
+            else:
+                cameras = _use_colmap(room, model, frames)
+        except Exception as error:  # noqa: BLE001 - MapAnything's cameras are the backup, so COLMAP failing doesn't fail the room
+            traceback.print_exc()
+            cameras = {"used": "mapanything", "reason": f"{type(error).__name__}: {error}"}
+        cameras["seconds"] = round(time.perf_counter() - started, 1)
+
     stage("making the solid surface")
     try:
         triangles = _fuse(room, out / "room-surface.ply")
@@ -535,6 +664,7 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
         "splatsError": splats_error,
         "model": model_key,
         "joins": joins,
+        "cameras": cameras,
     }
     (out / "result.json").write_text(json.dumps(result, indent=2))
     return result

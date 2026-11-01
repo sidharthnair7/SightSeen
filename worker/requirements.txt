@@ -3,6 +3,8 @@ fastapi
 uvicorn[standard]
 python-multipart
 opencv-python
+# COLMAP (BSD-3-Clause): the cameras for the splats, steadier than MapAnything's own
+pycolmap==4.2.1
 # Open3D (installed by setup.sh on its own, without its notebook extras) imports these two when it starts
 plotly==7.1.0
 dash==4.5.0
