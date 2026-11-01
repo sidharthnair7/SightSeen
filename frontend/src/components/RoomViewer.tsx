@@ -49,6 +49,7 @@ export default function RoomViewer({ url }: { url: string }) {
   const surfaceMesh = useRef<THREE.Mesh | null>(null)
   const cloudPoints = useRef<THREE.Points | null>(null)
   const shown = useRef<Look>('dots')
+  const refreshSplats = useRef<() => void>(() => {})
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [picked, setPicked] = useState(0)
   const [distance, setDistance] = useState<number | null>(null)
@@ -70,6 +71,9 @@ export default function RoomViewer({ url }: { url: string }) {
     if (splatMesh.current) splatMesh.current.visible = showing === 'real'
     if (surfaceMesh.current) surfaceMesh.current.visible = showing === 'solid'
     if (cloudPoints.current) cloudPoints.current.visible = showing === 'dots'
+    // Spark only rebuilds its splats when the camera moves more than 1 mm or its set of splats changes, and
+    // showing splats that were hidden is neither: without this they stay invisible until the first drag
+    if (showing === 'real') refreshSplats.current()
   }, [showing, state])
 
   useEffect(() => {
@@ -105,6 +109,9 @@ export default function RoomViewer({ url }: { url: string }) {
     // Splats come out of training in OpenCV axes (y down, z away from the camera); a half turn about x puts them
     // in three.js axes, the same flip the surface and points already had
     scene.add(spark)
+    refreshSplats.current = () => {
+      spark.update({ scene, camera }).catch(() => {})
+    }
     const splats = new SplatMesh({ url: url.replace('/room.ply', '/room-splats.ply') })
     splats.quaternion.set(1, 0, 0, 0)
     splats.visible = false
@@ -113,9 +120,6 @@ export default function RoomViewer({ url }: { url: string }) {
       splatMesh.current = splats
       splats.visible = shown.current === 'real'
       scene.add(splats)
-      // Spark only re-sorts when the camera moves from where it last sorted, which starts at the origin looking
-      // down -z: the very view a room opens on. Without this, the splats stay invisible until the first drag.
-      spark.sortDirty = true
       setHasSplats(true)
     }, () => {})
 
@@ -230,6 +234,7 @@ export default function RoomViewer({ url }: { url: string }) {
       surfaceMesh.current = null
       splats.dispose()
       splatMesh.current = null
+      refreshSplats.current = () => {}
       scene.remove(spark)  // the shared renderers stay alive for the next room
       el.removeChild(renderer.domElement)
     }
