@@ -237,6 +237,8 @@ def make_textures(out):
         seen &= ~speck[labels]
         picture = _blend(data, gains).reshape(grid["rows"], grid["cols"], 3)
         picture = _fill(picture, seen, np.array(shell["faces"][face]) / 255, grid["texel"][0])
+        # which texels a frame really saw (white) and which are fill (black), for the room checks and the viewer
+        cv2.imwrite(str(out / f"room-shell-{face}-seen.png"), seen.astype(np.uint8) * 255)
         seen = seen.reshape(-1)
         name = f"room-shell-{face}.jpg"
         cv2.imwrite(str(out / name), (np.clip(picture, 0, 1) * 255 + 0.5).astype(np.uint8)[:, :, ::-1],
@@ -244,7 +246,7 @@ def make_textures(out):
         label = lambda a, sign: ("+" if sign > 0 else "-") + "xyz"[a]  # noqa: E731
         used = data["weight"].sum(axis=1) > 0
         report["faces"][face] = {
-            "file": name, "pixels": [grid["cols"], grid["rows"]],
+            "file": name, "seen": f"room-shell-{face}-seen.png", "pixels": [grid["cols"], grid["rows"]],
             "texelMetres": [round(grid["texel"][0], 5), round(grid["texel"][1], 5)],
             "coverage": round(float(seen.mean()), 3),
             "columns": label(*axis[2]), "rows": label(*axis[3]),
