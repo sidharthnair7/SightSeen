@@ -81,6 +81,9 @@ MIN_EYE, MAX_EYE = 0.9, 2.0  # metres: a phone held for filming sits in here, so
 LEVEL_SPREAD = 0.10  # metres: flat patches this close to the lowest (or highest) one are the same floor (or ceiling)
 WALL_DEGREES = 20  # surface facing within this of a wall direction counts towards that wall
 WALL_SHARE = 0.25  # a 2 cm slice needs this share of the busiest slice's surface to be a wall, not a stray bit
+# metres (8 ft, the usual ceiling here): when the video never saw the ceiling, the shell is at least this tall, and
+# room-shell.json says the height was assumed (take 4 filmed nothing above 1.83 m, which made a room too low to stand in)
+ASSUMED_CEILING = 2.44
 SHELL_TRIM = 0.06  # metres: splats this close to a wall or the ceiling go, and the clean shell shows there instead
 FLOOR_TRIM = 0.03  # metres: the same for the floor, kept tighter so things standing on it keep their feet
 BLOB = 0.30  # metres: splats wider than this are smears up close, not detail
@@ -727,7 +730,7 @@ def write_room_shell(out):
     turn = np.arctan2(normals[sideways, 2], normals[sideways, 0])
     yaw = float(np.angle(np.exp(4j * turn).mean()) / 4)  # the walls' direction, on a 90-degree turn
     axes = [np.array([math.cos(yaw), 0.0, math.sin(yaw)]), np.array([-math.sin(yaw), 0.0, math.cos(yaw)])]
-    height = frame["ceilingHeight"] or float(np.percentile(points[:, 1], 99))
+    height = frame["ceilingHeight"] or max(float(np.percentile(points[:, 1], 99)), ASSUMED_CEILING)
 
     walls, faces = [], {}
     for axis, names in zip(axes, (("left", "right"), ("front", "back"))):
@@ -750,6 +753,7 @@ def write_room_shell(out):
         "size": [round(width, 3), round(height, 3), round(length, 3)],  # along the walls' x, up, along their z
         "yawDegrees": round(math.degrees(yaw), 2),
         "faces": faces,  # RGB 0-255: left and right walls (x), front and back (z), floor, ceiling
+        "ceilingAssumed": not frame["ceilingHeight"],
     }
     (out / "room-shell.json").write_text(json.dumps(shell, indent=2))
     return shell

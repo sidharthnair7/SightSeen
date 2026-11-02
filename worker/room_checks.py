@@ -64,7 +64,7 @@ class WalkRoom:
     """The Walk room as the viewer draws it, for casting rays: the shell box 1 cm outside the walls with its photo
     faces, and the furniture mesh with its photo colours, in the upright room (metres, floor at 0)."""
 
-    def __init__(self, folder):
+    def __init__(self, folder, furniture="room-furniture.ply"):
         import open3d as o3d
 
         folder = Path(folder)
@@ -83,7 +83,7 @@ class WalkRoom:
             seen = folder / info.get("seen", f"room-shell-{face}-seen.png")
             self.seen[face] = cv2.imread(str(seen), cv2.IMREAD_GRAYSCALE) > 127 if seen.exists() else None
 
-        mesh = o3d.io.read_triangle_mesh(str(folder / "room-furniture.ply"))
+        mesh = o3d.io.read_triangle_mesh(str(folder / furniture))  # or the Rebuilt look's room-things-all.ply
         self.colours = np.asarray(mesh.vertex_colors)
         self.triangles = np.asarray(mesh.triangles)
         corners = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], dtype=float)
@@ -216,10 +216,10 @@ def paint_from_splats(out):
     return {"textures": make_textures(out, images=renders), "furniture": build_furniture(out, images=renders)}
 
 
-def _held_out_build(out, held, paint="video"):
+def _held_out_build(out, held, paint="video", light="video"):
     """A copy of the room's inputs without the held-back frames, with the walls and furniture rebuilt from the rest:
     painted from the kept video frames, or ("splats") from splats trained on the kept frames only."""
-    check = out / "checks" / f"held-out-{paint}"
+    check = out / "checks" / f"held-out-{paint}-{light}"
     if check.exists():
         shutil.rmtree(check)
     (check / "splat-data" / "sparse" / "0").mkdir(parents=True)
@@ -238,7 +238,8 @@ def _held_out_build(out, held, paint="video"):
             kept.append(line)
         elif len(parts) == 10 and parts[9] not in held:
             kept += [line, ""]
-            shutil.copyfile(out / "splat-data" / "images" / parts[9], check / "splat-data" / "images" / parts[9])
+            source = out / ("frames-base-light" if light == "base" else "splat-data/images")
+            shutil.copyfile(source / parts[9], check / "splat-data" / "images" / parts[9])
     (check / "splat-data" / "sparse" / "0" / "images.txt").write_text("\n".join(kept) + "\n")
     images = None
     if paint == "splats":
@@ -253,20 +254,21 @@ def _held_out_build(out, held, paint="video"):
     return check
 
 
-def test_looks_like_the_video(out, paint="video"):
+def test_looks_like_the_video(out, paint="video", light="video"):
     """Test 2: the held-back frames against the Walk room drawn from their cameras, and views from the middle."""
     cameras = _cameras(out / "splat-data")
     held = {camera["name"] for k, camera in enumerate(cameras) if k % HOLD_OUT == 3}
     solved = _colmap_solved(out / "colmap" / "model" / "0") or set()
     started = time.perf_counter()
-    walk = WalkRoom(_held_out_build(out, held, paint))
+    walk = WalkRoom(_held_out_build(out, held, paint, light))
+    real_frames = out / ("frames-base-light" if light == "base" else "splat-data/images")  # Test 3: compare under one light
     pictures = out / "checks"
     scores = []
     sheet = []
     for camera in cameras:
         if camera["name"] not in held or Path(camera["name"]).stem not in solved:
             continue
-        real = cv2.imread(str(out / "splat-data" / "images" / camera["name"]))[:, :, ::-1].astype(np.float32) / 255
+        real = cv2.imread(str(real_frames / camera["name"]))[:, :, ::-1].astype(np.float32) / 255
         height, width = real.shape[:2]
         v, u = np.indices((height, width)) + 0.5
         origins, directions = walk.camera_rays(camera, u.reshape(-1), v.reshape(-1))
@@ -279,7 +281,7 @@ def test_looks_like_the_video(out, paint="video"):
                        "torn": round(float((kind == "torn").mean()), 3),
                        "unfilmed": round(float((kind == "unfilmed").mean()), 3)})
         sheet.append(np.hstack([real, drawn]))
-    cv2.imwrite(str(pictures / f"test2-held-back-{paint}.jpg"),
+    cv2.imwrite(str(pictures / f"test2-held-back-{paint}-{light}.jpg"),
                 (np.vstack(sheet[:6]) * 255).astype(np.uint8)[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 88])
 
     full = WalkRoom(out)  # the room as built, from where the phone never stood: the middle, eye height, 4 ways

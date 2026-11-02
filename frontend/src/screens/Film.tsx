@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle2 } from 'lucide-react'
 import { api, uploadVideo } from '../api'
+import Recorder from '../components/Recorder'
 import VideoPicker from '../components/VideoPicker'
 import { filmingSteps } from '../instructions'
 import type { FilmView } from '../types'
@@ -59,7 +60,11 @@ export default function Film({ token }: { token: string }) {
           </div>
         ) : (
           <>
-            <VideoPicker label="Record or choose the video" progress={progress} onPick={send} />
+            <Recorder sending={progress} onSend={send} />
+            <div className="mt-6 border-t border-slate-200 pt-4">
+              <p className="mb-2 text-sm text-slate-600">Already filmed it? Send that video instead.</p>
+              <VideoPicker label="Choose a video" progress={progress} onPick={send} />
+            </div>
             {view.videoReceived && (
               <p className="mt-3 text-sm text-slate-600">A video was already sent. Sending another one replaces it.</p>
             )}

@@ -10,3 +10,5 @@ plotly==7.1.0
 dash==4.5.0
 # Meta's parser for SAM 3.1's answers (SAM License): decodes the masks for the Walk look's furniture
 meta-sam-parser==0.1.0
+# fal.ai's client: runs SAM 3D Objects (it needs a 32 GB graphics card) for the Rebuilt look (rebuild_things.py build)
+fal-client==1.0.3

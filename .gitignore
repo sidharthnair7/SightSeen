@@ -26,3 +26,6 @@ frontend/dist/
 .plans/
 .claude/
 CHECKLIST.md
+
+# The phone-testing HTTPS certificate (a private key: never commit it)
+frontend/certs/

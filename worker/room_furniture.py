@@ -49,6 +49,8 @@ KEEP = 6  # blend the best 6 frames per vertex
 SHARPER = 1  # weights go as (score / best score) ** SHARPER: softer blending scored better on held-back frames
 ADDED_BACK = 0.4  # frames COLMAP couldn't place (lined up by MapAnything instead) are rougher: their score x this
 GAIN_LIMITS = (0.6, 1.6)
+TRUTH = 0.05  # metres: with `truth`, a vertex takes a frame's colour only this close to the real surface it sees
+TRUTH_PER_METRE = 0.02  # plus this much per metre of depth
 
 
 def _read_ply(path):
@@ -169,8 +171,14 @@ def _bilinear(picture, u, v):
             + (picture[y0 + 1, x0] * (1 - fx) + picture[y0 + 1, x0 + 1] * fx) * fy)
 
 
-def recolour(out, upright_points, normals, fused_colours, surface_cv, triangles_all, level, lift, images=None):
-    """Each vertex's colour from the frames that see it best (see the module doc). Returns colours 0-1 and stats."""
+def recolour(out, upright_points, normals, fused_colours, surface_cv, triangles_all, level, lift, images=None,
+             allowed=None, truth=None):
+    """Each vertex's colour from the frames that see it best (see the module doc). Returns colours 0-1 and stats.
+    `allowed`: frame name -> a frame-sized True/False picture; when given, a frame colours a vertex only where it
+    lands on True (a thing's own SAM 3.1 outline, so the desk never gets the monitor's pixels), and frames without
+    one don't colour at all. `truth`: (vertices, triangles) of the real fused surface, OpenCV room space; when
+    given, a frame colours a vertex only where the real surface it sees there is within TRUTH of the vertex, so a
+    block's face takes no colour where the real thing isn't (the gap under a desk, the wall past a monitor)."""
     import cv2
     import open3d as o3d
 
@@ -182,6 +190,10 @@ def recolour(out, upright_points, normals, fused_colours, surface_cv, triangles_
 
     scene = o3d.t.geometry.RaycastingScene()
     scene.add_triangles(o3d.core.Tensor(surface_cv.astype(np.float32)), o3d.core.Tensor(triangles_all.astype(np.uint32)))
+    real_scene = None
+    if truth is not None:
+        real_scene = o3d.t.geometry.RaycastingScene()
+        real_scene.add_triangles(o3d.core.Tensor(truth[0].astype(np.float32)), o3d.core.Tensor(truth[1].astype(np.uint32)))
 
     # Upright to OpenCV room space: p_three = level^T (p + lift), p_cv = FLIP p_three
     to_cv = FLIP @ level.T
@@ -194,6 +206,9 @@ def recolour(out, upright_points, normals, fused_colours, surface_cv, triangles_
     gains = []
     for index, (camera, picture) in enumerate(zip(cameras, pictures)):
         height, width = picture.shape[:2]
+        if allowed is not None and camera["name"] not in allowed:
+            gains.append([1.0, 1.0, 1.0])
+            continue
         lens, turn, shift = camera["lens"], camera["turn"], camera["shift"]
         # The frame's depth map: one ray per pixel centre, directions with camera z = 1 so t_hit is the depth
         cols, rows = np.meshgrid(np.arange(width) + 0.5, np.arange(height) + 0.5)
@@ -203,6 +218,9 @@ def recolour(out, upright_points, normals, fused_colours, surface_cv, triangles_
         rays = np.hstack([np.repeat(centre[None], len(directions), 0), directions]).astype(np.float32)
         depth = scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy().reshape(height, width)
         depth = np.where(np.isfinite(depth), depth, 1e3).astype(np.float32)
+        if real_scene is not None:
+            real_depth = real_scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy().reshape(height, width)
+            real_depth = np.where(np.isfinite(real_depth), real_depth, 1e3).astype(np.float32)
         kernel = np.ones((2 * NEAR_EDGE_PX + 1, 2 * NEAR_EDGE_PX + 1), np.uint8)
         nearest, furthest = cv2.erode(depth, kernel), cv2.dilate(depth, kernel)
 
@@ -216,6 +234,12 @@ def recolour(out, upright_points, normals, fused_colours, surface_cv, triangles_
         px, py = u[which].astype(int), v[which].astype(int)
         visible = z[which] < depth[py, px] + HIDDEN
         which, px, py = which[visible], px[visible], py[visible]
+        if allowed is not None:
+            own = allowed[camera["name"]][py, px]
+            which, px, py = which[own], px[own], py[own]
+        if real_scene is not None:
+            there = np.abs(z[which] - real_depth[py, px]) < TRUTH + TRUTH_PER_METRE * z[which]
+            which, px, py = which[there], px[there], py[there]
         to_camera = centre - points[which]
         distance = np.linalg.norm(to_camera, axis=1)
         facing = np.abs(np.sum(turned[which] * to_camera, axis=1)) / np.maximum(distance, 1e-6)

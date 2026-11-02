@@ -3,10 +3,12 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js'
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark'
-import { Ruler, X } from 'lucide-react'
+import { Eye, Hand, Ruler, RotateCcw, X } from 'lucide-react'
 import { SHELL_FACES, type RoomShell } from './walk/types'
 import { texturedShellMaterials } from './walk/shellTextures'
 import { loadFurniture } from './walk/furniture'
+import { movableThings, type Movable } from './walk/moveThings'
+import { loadRebuilt } from './walk/rebuilt'
 
 const MARK = '#f59e0b'
 const WALK_STEP = 0.1 // metres per scroll notch
@@ -15,7 +17,7 @@ const WALK_FOV = 70 // degrees top to bottom in the Walk look: about what a pers
 // shell draws the walls, floor and ceiling, and the splats only the things in the room.
 const SHELL_GAP = 0.01
 
-type Look = 'real' | 'walk' | 'solid' | 'dots'
+type Look = 'rebuilt' | 'real' | 'walk' | 'solid' | 'dots'
 
 /** One frame's camera from cameras.json: three.js axes, quaternion as w, x, y, z, widths of view in degrees. */
 type CameraSpot = { frame: string; position: number[]; quaternion: number[]; fovX: number; fovY: number }
@@ -35,7 +37,7 @@ function fetchJson<T>(url: string): Promise<T | null> {
     .catch(() => null)
 }
 
-const LABELS: Record<Look, string> = { real: 'Real', walk: 'Walk', solid: 'Solid', dots: 'Dots' }
+const LABELS: Record<Look, string> = { rebuilt: 'Rebuilt', real: 'Real', walk: 'Walk', solid: 'Solid', dots: 'Dots' }
 
 // One WebGL renderer and one Spark renderer for the whole app. Spark keeps shared GPU data tied to the renderer it
 // first draws with, so a viewer that made its own renderer (React builds effects twice in development, and every
@@ -53,7 +55,8 @@ function sharedRenderer() {
 }
 
 /** The look asked for, or the next best one this room has: splats, then the solid surface, then dots. */
-function pick(look: Look, hasSplats: boolean, hasSurface: boolean, hasWalk: boolean): Look {
+function pick(look: Look, hasSplats: boolean, hasSurface: boolean, hasWalk: boolean, hasRebuilt: boolean): Look {
+  if (look === 'rebuilt' && hasRebuilt) return 'rebuilt'
   if (look === 'walk' && hasWalk) return 'walk'
   if (look === 'real' && hasSplats) return 'real'
   if (look !== 'dots' && hasSurface) return 'solid'
@@ -73,10 +76,15 @@ export default function RoomViewer({ url }: { url: string }) {
   const clear = useRef<() => void>(() => {})
   const material = useRef<THREE.PointsMaterial | null>(null)
   const baseSize = useRef(0.01)
-  const splatMesh = useRef<SplatMesh | null>(null)
+  const splatMesh = useRef<THREE.Object3D | null>(null) // the room's splats: one SplatMesh, or its movable pieces
+  const movable = useRef<Movable | null>(null)
+  const moveOn = useRef(false)
   const surfaceMesh = useRef<THREE.Mesh | null>(null)
   const shellMesh = useRef<THREE.Mesh | null>(null)
   const blocks = useRef<THREE.Group | null>(null)
+  const rebuiltGroup = useRef<THREE.Group | null>(null) // the Rebuilt look's things, whole on every side
+  const rebuiltMovable = useRef<Movable | null>(null)
+  const rebuiltTint = useRef<((on: boolean) => void) | null>(null)
   const refitView = useRef<() => void>(() => {})
   const cloudPoints = useRef<THREE.Points | null>(null)
   const shown = useRef<Look>('dots')
@@ -89,9 +97,14 @@ export default function RoomViewer({ url }: { url: string }) {
   const [hasSplats, setHasSplats] = useState(false)
   const [hasSurface, setHasSurface] = useState(false)
   const [hasWalk, setHasWalk] = useState(false)
-  const showing = pick(look, hasSplats, hasSurface, hasWalk)
-  const available: Record<Look, boolean> = { real: hasSplats, walk: hasWalk, solid: hasSurface, dots: true }
-  const looks = (['real', 'walk', 'solid', 'dots'] as const).filter(option => available[option])
+  const [hasMovable, setHasMovable] = useState(false)
+  const [hasRebuilt, setHasRebuilt] = useState(false)
+  const [notFilmed, setNotFilmed] = useState(false) // the Rebuilt look's never-filmed parts tinted
+  const [moving, setMoving] = useState(false)
+  const [held, setHeld] = useState<string | null>(null)
+  const showing = pick(look, hasSplats, hasSurface, hasWalk, hasRebuilt)
+  const available: Record<Look, boolean> = { rebuilt: hasRebuilt, real: hasSplats, walk: hasWalk, solid: hasSurface, dots: true }
+  const looks = (['rebuilt', 'real', 'walk', 'solid', 'dots'] as const).filter(option => available[option])
 
   useEffect(() => {
     if (material.current) material.current.size = baseSize.current * dots
@@ -103,6 +116,13 @@ export default function RoomViewer({ url }: { url: string }) {
     if (surfaceMesh.current) surfaceMesh.current.visible = showing === 'solid'
     if (shellMesh.current) shellMesh.current.visible = showing !== 'dots'
     if (blocks.current) blocks.current.visible = showing === 'walk'
+    if (rebuiltGroup.current) rebuiltGroup.current.visible = showing === 'rebuilt'
+    // Each look moves its own things: changing look puts the hand down
+    moveOn.current = false
+    movable.current?.setOn(false)
+    rebuiltMovable.current?.setOn(false)
+    setMoving(false)
+    setHeld(null)
     refitView.current()
     if (cloudPoints.current) cloudPoints.current.visible = showing === 'dots'
     // Spark only rebuilds its splats when the camera moves more than 1 mm or its set of splats changes, and
@@ -120,6 +140,8 @@ export default function RoomViewer({ url }: { url: string }) {
     setHasSplats(false)
     setHasSurface(false)
     setHasWalk(false)
+    setHasRebuilt(false)
+    setNotFilmed(false)
 
     const { renderer, spark } = sharedRenderer()
     renderer.setSize(el.clientWidth, el.clientHeight)
@@ -133,7 +155,9 @@ export default function RoomViewer({ url }: { url: string }) {
     // where it is instead of swinging round into places no frame was filmed from. The wheel walks forward and back.
     const controls = new OrbitControls(camera, renderer.domElement)
     // In development only: the camera and scene on window, so a browser console can check where the viewer stands
-    if (import.meta.env.DEV) Object.assign(window, { sightseen: { camera, controls, scene } })
+    if ((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV) {
+      Object.assign(window, { sightseen: { camera, controls, scene } })
+    }
     controls.enableDamping = true
     controls.enableZoom = false
     controls.rotateSpeed = -0.35 // drag the room the way you'd turn your head
@@ -175,8 +199,9 @@ export default function RoomViewer({ url }: { url: string }) {
     const splats = new SplatMesh({ url: url.replace('/room.ply', '/room-splats.ply') })
     splats.quaternion.set(1, 0, 0, 0)
     splats.visible = false
+    let replaced = false // true once the room's movable pieces stand in for the single splat file
     splats.initialized.then(() => {
-      if (disposed) return
+      if (disposed || replaced) return
       splatMesh.current = splats
       splats.visible = shown.current === 'real'
       room.add(splats)
@@ -189,7 +214,7 @@ export default function RoomViewer({ url }: { url: string }) {
     // In the Walk look nothing smears, so it uses a normal wide view instead
     let fovX: number | null = null
     const fitView = () => {
-      if (shown.current === 'walk') {
+      if (shown.current === 'walk' || shown.current === 'rebuilt') {
         camera.fov = WALK_FOV
       } else if (fovX !== null) {
         const half = THREE.MathUtils.degToRad(fovX / 2)
@@ -268,7 +293,41 @@ export default function RoomViewer({ url }: { url: string }) {
           things.clear()
           things.add(furniture)
         }, () => {})
+        // The room's things rebuilt whole by SAM 3D, when this room has them: the Rebuilt look, shown first
+        loadRebuilt(assets, scene, camera, renderer.domElement, found, name => setHeld(name)).then(rebuilt => {
+          if (!rebuilt) return
+          if (disposed) {
+            rebuilt.movable.dispose()
+            return
+          }
+          rebuiltGroup.current = rebuilt.group
+          rebuiltMovable.current = rebuilt.movable
+          rebuiltTint.current = rebuilt.showNotFilmed
+          rebuilt.group.visible = shown.current === 'rebuilt'
+          scene.add(rebuilt.group)
+          setHasRebuilt(true)
+          setLook('rebuilt')
+        }, () => {})
       }
+      // The room's things as movable pieces (the same splats, split by SAM 3.1), when the room has them
+      movableThings(assets, room, scene, camera, renderer.domElement, frame && found ? found : null,
+        name => setHeld(name), () => refreshSplats.current()).then(pieces => {
+        if (!pieces) return
+        if (disposed) {
+          pieces.dispose()
+          return
+        }
+        movable.current = pieces
+        replaced = true
+        room.remove(splats)
+        splats.dispose()
+        pieces.parts.visible = shown.current === 'real'
+        room.add(pieces.parts)
+        splatMesh.current = pieces.parts
+        setHasSplats(true)
+        setHasMovable(true)
+        requestAnimationFrame(() => refreshSplats.current())
+      }, () => {})
       room.updateMatrixWorld(true)
       const first = path?.[0]
       const facing = room.quaternion.clone()
@@ -325,6 +384,7 @@ export default function RoomViewer({ url }: { url: string }) {
     const onUp = (e: PointerEvent) => {
       const start = down
       down = null
+      if (moveOn.current) return // moving things: clicks pick things up, they don't measure
       // A drag turns the view; only a still click measures
       if (!start || !cloud || Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) return
       const rect = renderer.domElement.getBoundingClientRect()
@@ -353,6 +413,18 @@ export default function RoomViewer({ url }: { url: string }) {
     }
     renderer.domElement.addEventListener('pointerdown', onDown)
     renderer.domElement.addEventListener('pointerup', onUp)
+    // Grabbing a thing comes first (capture), and holds the view still until the thing is let go
+    const onGrab = (e: PointerEvent) => {
+      const active = shown.current === 'rebuilt' ? rebuiltMovable.current : movable.current
+      if (!active?.grab(e)) return
+      controls.enabled = false
+      const letGo = () => {
+        controls.enabled = true
+        window.removeEventListener('pointerup', letGo)
+      }
+      window.addEventListener('pointerup', letGo)
+    }
+    renderer.domElement.addEventListener('pointerdown', onGrab, { capture: true })
 
     clear.current = () => {
       points.length = 0
@@ -383,7 +455,16 @@ export default function RoomViewer({ url }: { url: string }) {
       resize.disconnect()
       renderer.domElement.removeEventListener('pointerdown', onDown)
       renderer.domElement.removeEventListener('pointerup', onUp)
+      renderer.domElement.removeEventListener('pointerdown', onGrab, { capture: true })
       renderer.domElement.removeEventListener('wheel', onWheel)
+      movable.current?.dispose()
+      movable.current = null
+      rebuiltMovable.current?.dispose()
+      rebuiltMovable.current = null
+      if (rebuiltGroup.current) scene.remove(rebuiltGroup.current)
+      rebuiltGroup.current = null
+      rebuiltTint.current = null
+      moveOn.current = false
       controls.dispose()
       cloud?.geometry.dispose()
       material.current?.dispose()
@@ -406,7 +487,7 @@ export default function RoomViewer({ url }: { url: string }) {
         }
       })
       blocks.current = null
-      splats.dispose()
+      if (!replaced) splats.dispose()
       splatMesh.current = null
       refreshSplats.current = () => {}
       refitView.current = () => {}
@@ -421,7 +502,19 @@ export default function RoomViewer({ url }: { url: string }) {
       <div className="pointer-events-none absolute left-3 top-3 max-w-xs rounded-lg bg-black/60 px-3 py-2 text-sm text-white">
         {state === 'loading' && 'Loading the 3D room...'}
         {state === 'error' && 'The 3D room could not be loaded.'}
-        {state === 'ready' && (
+        {state === 'ready' && moving && (
+          <span className="inline-flex items-center gap-1.5">
+            <Hand size={15} />
+            {held ? `Moving the ${held}. Drag it across the floor.` : 'Click a thing and drag it across the floor.'}
+          </span>
+        )}
+        {state === 'ready' && !moving && notFilmed && showing === 'rebuilt' && (
+          <span className="inline-flex items-center gap-1.5">
+            <Eye size={15} />
+            Purple: what the video never saw, filled in by SAM 3D.
+          </span>
+        )}
+        {state === 'ready' && !moving && !(notFilmed && showing === 'rebuilt') && (
           <span className="inline-flex items-center gap-1.5">
             <Ruler size={15} />
             {picked === 0 && 'Click two points to measure between them.'}
@@ -444,6 +537,45 @@ export default function RoomViewer({ url }: { url: string }) {
       </p>
       {state === 'ready' && (
         <div className="absolute bottom-3 right-3 flex items-center gap-2">
+          {hasRebuilt && showing === 'rebuilt' && (
+            <button
+              type="button"
+              onClick={() => {
+                const next = !notFilmed
+                rebuiltTint.current?.(next)
+                setNotFilmed(next)
+              }}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs ${notFilmed ? 'bg-purple-500 text-white' : 'bg-black/60 text-white hover:bg-black/80'}`}
+            >
+              <Eye size={14} /> Not filmed
+            </button>
+          )}
+          {((hasMovable && showing === 'real') || (hasRebuilt && showing === 'rebuilt')) && (
+            <div className="flex overflow-hidden rounded-lg bg-black/60 text-xs text-white">
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !moving
+                  moveOn.current = next
+                  ;(showing === 'rebuilt' ? rebuiltMovable.current : movable.current)?.setOn(next)
+                  setMoving(next)
+                  if (!next) setHeld(null)
+                }}
+                className={`inline-flex items-center gap-1.5 px-3 py-2 ${moving ? 'bg-amber-500 text-black' : 'hover:bg-black/40'}`}
+              >
+                <Hand size={14} /> Move things
+              </button>
+              {moving && (
+                <button
+                  type="button"
+                  onClick={() => (showing === 'rebuilt' ? rebuiltMovable.current : movable.current)?.reset()}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 hover:bg-black/40"
+                >
+                  <RotateCcw size={14} /> Put back
+                </button>
+              )}
+            </div>
+          )}
           {looks.length > 1 && (
             <div className="flex overflow-hidden rounded-lg bg-black/60 text-xs text-white">
               {looks.map(option => (
