@@ -1,72 +1,119 @@
 # SightSeen
 
-See a rental room in 3D, at real size, from the landlord's video, before you sign.
+**See the room before you sign.** A landlord films a room with one link. SightSeen turns the video into a 3D room at
+real size that a student can walk around, measure, fill with their own things, check for red flags, and step into in VR.
 
-Students renting from far away can't visit a place before signing. With SightSeen, the student starts a request and texts the landlord one link. The landlord films the room through that link, and SightSeen rebuilds it in 3D so the student can look around it and measure it.
+Built for Meta's Global AI Developer Hackathon with MapAnything, SAM 3.1, Muse Spark and SAM 3D Objects.
 
-## Meta models
+## The problem
 
-- **MapAnything** (Meta, open weights) rebuilds the room in 3D, at metric scale, from frames of the video. SightSeen loads `facebook/map-anything-apache` (Apache 2.0) by default. `facebook/map-anything` (CC-BY-NC 4.0, non-commercial) is used only to compare the two on test rooms.
-- Next: SAM 3.1 and Muse Spark through the Meta Model API, to find doors and outlets of known size and check the room's scale against them.
+Students moving to a new city or country often sign for a room they've never seen. They can't afford the trip, so they
+decide from a few photos. Then they find out the room is smaller than the ad said, their desk won't fit, or there's
+damage nobody showed them. Rental scams aimed at students work the same way: a convincing listing, and no way to check.
 
-## How it fits together
+## What SightSeen does
 
-- `src/`: Spring Boot (Java 25). Requests, the student's and the landlord's APIs, and the jobs sent to the 3D helper. Data lives in `data/` (an H2 file, the videos and the 3D rooms).
-- `worker/`: the 3D helper (Python, FastAPI). It takes frames from a video and runs MapAnything on the GPU. One run can only take about 24 frames on an 8 GB card, so a longer video gets one run spread over the whole video first, which sets the room's shape and size. Then the video is cut into equal parts for detail. Each part gets the whole-video run's camera positions for the frames they share, so MapAnything builds it to agree, and then it's lined up with that run. Then COLMAP solves the cameras again, precisely, and MapAnything's depth gives them real size. If COLMAP can't place enough of the frames, MapAnything's cameras stay. Then every frame is merged into one solid surface (TSDF fusion with Open3D), and Brush trains Gaussian splats on the frames so the room looks like the video. It writes `room-splats.ply` (the room as it looks), `room-surface.ply` (the solid room the measuring tool uses), `room.ply` (the same room as dots) and `result.json` (the numbers, including how well each part lined up and whose cameras were used) next to the video.
-- `frontend/`: React, TypeScript, Tailwind and three.js. The student's request page and 3D view with a measuring tool, and the landlord's filming page.
+1. **One link, no app.** The student starts a request and texts the landlord a link. The landlord films the room in the
+   browser. A video filmed live in that page is marked as filmed live, which is much harder to fake than sending a copy
+   of another listing's tour.
+2. **The room in 3D, at real size.** MapAnything rebuilds the room in metres from the video. Every measurement says how
+   sure it is, and one tape-measured length (typed on the page) sets the whole room's scale.
+3. **Two ways to see it.**
+   - **Real:** Gaussian splats that look like the video. You step between the spots the phone filmed from, so every
+     view looks like the real room.
+   - **Rebuilt:** every piece of furniture found by Muse Spark and SAM 3.1 and rebuilt whole by SAM 3D Objects, so you
+     can walk anywhere and move things around.
+4. **Will my stuff fit?** Photograph your own desk or chair, give its longest side, and SAM 3D builds it at that size.
+   It lands on free floor, and as you drag it, it tells you how much room it has: "It fits: 24 cm to the bed, 31 cm to
+   the nearest wall", or "It runs 8 cm into the desk".
+5. **Issues mode: flag less, and be right.** Plain rules sit on top of the AI:
+   - **Damage** (mould, stains, cracks, holes) shows only when SAM 3.1 outlines it in at least 2 frames, from views at
+     least 20 cm apart or 10° round, landing within 25 cm of each other. Everything that failed the gate is listed
+     with the rule it failed.
+   - **Never filmed:** walls and ceiling the video never showed, outlined in 3D, minus what furniture hides.
+   - **Size against the ad:** the measured floor area against the listing's claim, and it refuses to judge while the
+     scale is too rough.
+   - **How the video came in:** filmed live through the link, sent as a file, or uploaded by the student.
+6. **Step inside in VR.** In a Meta Quest's browser, Enter VR puts you in the room at its real size, where the video
+   began. Walk with the left stick, turn with the right, and point the trigger at two spots to measure in metres.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[Landlord films<br/>through the link] --> B[MapAnything<br/>3D in metres]
+    B --> C[COLMAP<br/>precise cameras]
+    C --> D[Brush<br/>Gaussian splats]
+    C --> E[Room shell<br/>walls, floor, ceiling]
+    E --> F[Scale check<br/>wall plates or a tape]
+    F --> G[Muse Spark + SAM 3.1<br/>find each thing]
+    G --> H[SAM 3D Objects<br/>rebuild it whole]
+    H --> I[Set in the room<br/>measured size and spot]
+    I --> J[Issues<br/>AI + plain-rules gate]
+    D --> K((Real look))
+    I --> L((Rebuilt look<br/>+ fit check))
+    J --> M((Issues panel))
+    L --> N((VR at real size))
+```
+
+| Meta model | What it does in SightSeen |
+|---|---|
+| **MapAnything** (open weights, Apache 2.0 checkpoint) | Rebuilds the room in metres from the video's frames |
+| **SAM 3.1** (Meta Model API) | Outlines each thing, wall plate and possible damage by name, in every frame |
+| **Muse Spark** (Meta Model API) | Looks over the whole video and lists the room's things and possible damage |
+| **SAM 3D Objects** (open weights) | Rebuilds each thing whole from one photo, on every side, at its measured size |
+
+The whole pipeline after the 3D step runs on its own (`worker/pipeline.py`): the walls' photos, the scale check, the
+things found, rebuilt and placed, then the issues. On this PC's 8 GB RTX 3070 it runs SAM 3D one model part at a time.
+In the cloud (`worker/modal_app.py`), each thing builds on its own GPU at once.
+
+## What makes it trustworthy
+
+- **Every size says how sure it is.** "Rough, from 2 wall plates (±40%)" or "checked with a tape measure". Wall plates
+  only change the scale when two or more agree. One tape-measured length beats everything.
+- **The gate is plain code.** An AI flag that appears in one frame only, or from one viewpoint seen twice, never
+  reaches the student.
+- **Assumptions are labelled.** A ceiling the video never filmed says "assumed". A measurement that reaches it says so.
 
 ## Research behind it
 
-I read these papers before and during the build. Here's what each one does, what SightSeen takes from it, and why I picked it over the other options.
+I read these papers before and during the build. Here's what each one does, what SightSeen takes from it, and why I
+picked it over the other options.
 
-**MapAnything** (Meta, [arXiv 2509.13414](https://arxiv.org/abs/2509.13414)). Turns photos into a 3D scene in metres, with every camera's position. It's the core of SightSeen.
-- Why this one: a student needs real sizes, and MapAnything gives metres straight away. VGGT (also Meta) gives the shape but not the real size, because it's trained on scenes scaled to a standard size. MASt3R gives metric 3D too, but its code is non-commercial only (CC BY-NC-SA 4.0).
-- On my own room it measured my desk at 77 to 79 cm. The tape says 77.
-- SightSeen uses the Apache 2.0 checkpoint by default. The non-commercial one is only there to compare. I'll pick one before the end.
+**MapAnything** (Meta, [arXiv 2509.13414](https://arxiv.org/abs/2509.13414)). Turns photos into a 3D scene in metres,
+with every camera's position. It's the core of SightSeen.
+- Why this one: a student needs real sizes, and MapAnything gives metres straight away. VGGT (also Meta) gives the
+  shape but not the real size. MASt3R gives metric 3D too, but its code is non-commercial only.
 
-**SAM 3** (Meta, [arXiv 2511.16719](https://arxiv.org/abs/2511.16719)), as SAM 3.1 on the Meta Model API. Finds and outlines every object that matches a short phrase like "door", in photos and video.
-- Why this one: UniMetric's paper used SAM 2.1, which needs a click or a box for each object. SAM 3 takes words, so SightSeen can ask for doors and outlets with nobody clicking.
-- Status: planned, for the size check below.
+**SAM 3** (Meta, [arXiv 2511.16719](https://arxiv.org/abs/2511.16719)), as SAM 3.1 on the Meta Model API. Outlines
+every object that matches a short phrase like "door" or "water stain".
+- Why this one: SAM 2.1 needs a click or a box for each object. SAM 3 takes words, so nobody has to click.
 
-**UniMetric** ([arXiv 2610.16945](https://arxiv.org/abs/2610.16945)). Checks and fixes a 3D model's size using everyday things with a known size range, like doors and outlets.
-- Why: MapAnything got my desk right, but one desk isn't proof. I'd rather build more than show a student wrong sizes.
-- To be fair to it: the paper tested nine other 3D models on mostly driving, roadside and robot scenes, not MapAnything and not a bedroom. So I'll judge it the same way, by tape against the 3D. Its code has no licence yet, so SightSeen will implement it from the paper's equations.
-- Status: next.
+**COLMAP** (Schönberger and Frahm, CVPR 2016), through pycolmap. Solves every camera together, so the views line up to
+under a pixel.
+- Why: my splats were blurry. Same frames, same trainer, only the cameras swapped: on frames the trainer never saw,
+  COLMAP's cameras scored 31.2 dB PSNR and MapAnything's 21.4. MapAnything's depth still gives COLMAP its metres.
 
-**VGGT-Long** ([arXiv 2507.16443](https://arxiv.org/abs/2507.16443)). Cuts long videos into parts a 3D model can handle, then lines the parts up.
-- What SightSeen takes: its way of lining up a part (Section 3.1). One fit per part, where points the model is unsure of count less and points that sit way off get ignored. Written from the paper, no code copied.
-- What I changed: VGGT-Long lines each part up with the one before. When I tried that on my room, small errors stacked up and sizes drifted by up to about 5%. SightSeen lines every part up with one run over the whole video instead. Sizes came back to within about 1% of the one-run version. It also hands each part that run's camera positions first, since MapAnything can take known camera positions as input. On my room that cut the worst gap between parts from 8.8 cm to 3.9 cm.
+**VGGT-Long** ([arXiv 2507.16443](https://arxiv.org/abs/2507.16443)). Lines up the parts of a long video. SightSeen
+lines every part up with one run over the whole video instead of the one before, which kept sizes within about 1%
+instead of drifting by up to 5%.
 
-**COLMAP** (Schönberger and Frahm, "Structure-from-Motion Revisited", [CVPR 2016](https://openaccess.thecvf.com/content_cvpr_2016/papers/Schonberger_Structure-From-Motion_Revisited_CVPR_2016_paper.pdf)), through pycolmap (BSD-3-Clause). Finds the same small details in many frames and solves every camera together, so the views line up to under a pixel.
-- Why: my splats were blurry and I couldn't tell why. I tested the trainer first (two different ones scored within about 1 dB of each other), then the cameras. On my room, MapAnything's guess of the lens changed from frame to frame (261 to 462 px, on a phone lens that never zoomed), and its camera directions were about 3 degrees off from COLMAP's. Same frames, same trainer, only the cameras swapped: on frames the trainer never saw, COLMAP's cameras scored 31.2 dB PSNR and MapAnything's 21.4. COLMAP won on all 17.
-- What MapAnything still does: COLMAP has no sense of size, so MapAnything's depth turns COLMAP's units into metres. MapAnything's depth also builds the solid surface the measuring tool uses. And when COLMAP can't place enough of the frames (blank walls, fast turns), SightSeen keeps MapAnything's cameras.
-- Why both: MapAnything alone gave the blur. COLMAP alone gives no metres and only sparse dots.
-- Sizes still check out: with COLMAP's cameras my desk measures about 77 cm in the app, and the tape says 77. The same room built on MapAnything's cameras alone came out 15 to 19% bigger on every side, which matches its lens guess being about 20% too wide.
-
-**G4Splat** ([arXiv 2510.12099](https://arxiv.org/abs/2510.12099)). Fills the parts of a room no camera saw. It finds flat surfaces like walls and floors and uses them to guide an AI video model.
-- What SightSeen takes: the ideas, not the code. Find the gaps by what the cameras covered, and use flat surfaces to fill walls and floors.
-- Why not run it: it takes about an hour per room on a 24 to 80 GB graphics card, on Linux. SightSeen runs on an 8 GB Windows card.
-
-**The solid surface: TSDF fusion** (Open3D, MIT). Merges every frame's depth into one surface, so walls are solid instead of millions of loose dots.
-- Why keep it now that there are splats: splats look more like a photo, but they need training for every room and they're hard to measure on. A surface keeps the measuring tool working, is light enough for VR, and gives real floors and walls to place things on later. The splats go on top of it: Brush (Apache 2.0) trains them and Spark (MIT) draws them in the browser.
+**UniMetric** ([arXiv 2610.16945](https://arxiv.org/abs/2610.16945)) and **G4Splat**
+([arXiv 2510.12099](https://arxiv.org/abs/2510.12099)): the ideas behind checking scale with things of known size, and
+filling what no camera saw. Taken as ideas, not code.
 
 ## Run it
 
-One-time setup of the 3D helper, from `worker/` in Git Bash (about 13 GB with both models):
-
-```bash
-bash setup.sh
-```
-
-Then three terminals:
+One-time setup of the 3D helper, from `worker/` in Git Bash: `bash setup.sh`. Then three terminals:
 
 1. 3D helper: `worker\run.ps1` (http://127.0.0.1:8001)
 2. Spring Boot: `mvn spring-boot:run` (http://localhost:8080)
 3. Frontend: `cd frontend`, then `npm install` and `npm run dev` (http://localhost:5173)
 
-To film from a phone on the same Wi-Fi, open the student page at `http://<this PC's IP>:5173`, so the landlord link points at this PC.
+Keys go in `.env` (see `.env.example`): `MODEL_API_KEY` for the Meta Model API, `HF_TOKEN` for SAM 3D's weights.
 
-Settings are in `src/main/resources/application.properties` (`sightseen.worker.*`: which model, frames per second of video, and the most frames in one run).
+**Stack:** Spring Boot (Java 25), React + TypeScript + three.js + Spark (splats) + WebXR, Python (FastAPI, Open3D,
+PyTorch), Modal for the cloud GPUs.
 
 ## Licence
 
