@@ -3,14 +3,17 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js'
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark'
-import { Camera, Eye, Hand, Ruler, RotateCcw, X } from 'lucide-react'
+import { AlertTriangle, Camera, Eye, Glasses, Hand, Package, Ruler, RotateCcw, RotateCw, Undo2, X } from 'lucide-react'
+import YourThings, { type Item } from './YourThings'
+import Issues, { type IssuesReport, type MeasuredRoom } from './Issues'
 import { SHELL_FACES, type RoomShell } from './walk/types'
 import { texturedShellMaterials } from './walk/shellTextures'
 import { materialShellMaterials } from './walk/shellMaterials'
 import { loadDecals } from './walk/decals'
 import { loadFurniture } from './walk/furniture'
-import { movableThings, type Movable } from './walk/moveThings'
-import { loadRebuilt } from './walk/rebuilt'
+import { movableThings, type Fit, type Movable } from './walk/moveThings'
+import { fetchModel, loadRebuilt } from './walk/rebuilt'
+import { makeVr, markPoint, onAssumedCeiling, vrSupported, type Vr } from './walk/vr'
 
 const MARK = '#f59e0b'
 const WALK_STEP = 0.1 // metres per scroll notch
@@ -25,7 +28,55 @@ type Look = 'rebuilt' | 'real' | 'walk' | 'solid' | 'dots'
 type CameraSpot = { frame: string; position: number[]; quaternion: number[]; fovX: number; fovY: number }
 
 /** room-frame.json: the turn that stands the room upright (w, x, y, z) and the floor's height before it's moved to 0. */
-type RoomFrame = { quaternion: number[]; floorHeight: number; eyeHeight: number; ceilingHeight: number | null }
+type RoomFrame = {
+  quaternion: number[]
+  floorHeight: number
+  eyeHeight: number
+  ceilingHeight: number | null
+  /** Real metres per unit of the rebuilt room (worker/room_scale.py), and what set it */
+  scale?: number | null
+  scaleEvidence?: { source?: string; plates?: number; what?: string; spread?: number[]; ratiosKept?: number } | null
+}
+
+/** How sure a floor area is: twice a length's share. */
+function areaTolerance(frame: RoomFrame): number {
+  return 2 * lengthTolerance(frame)
+}
+
+/** Where a room's real size comes from, in a few words, with how sure it is. */
+function scaleSource(frame: RoomFrame): string {
+  const evidence = frame.scaleEvidence
+  if (!frame.scale || !evidence) return "MapAnything's own scale, not yet checked (typically off by about 15%)"
+  if (evidence.source === 'tape measure') return `checked with a tape measure (${evidence.what?.replace('-', ' ')})`
+  return `rough, from ${evidence.plates ?? 'standard'} wall plates (±${Math.round(lengthTolerance(frame) * 100)}%)`
+}
+
+/** How sure a length is, as a share either way (about 95%): a tape measure to about 2%; wall plates by how much they
+ * disagree (the median of n readings: 1.96 standard errors, from their middle half's spread); MapAnything's own
+ * scale is off 13 to 16% on average (its paper). */
+function lengthTolerance(frame: RoomFrame): number {
+  const evidence = frame.scaleEvidence
+  if (!frame.scale || !evidence) return 0.15
+  if (evidence.source === 'tape measure') return 0.02
+  if (evidence.spread?.length === 2) {
+    const n = evidence.ratiosKept ?? 2 * (evidence.plates ?? 1)
+    const sigma = (evidence.spread[1] - evidence.spread[0]) / 1.349
+    return Math.max(0.02, (1.96 * 1.2533 * sigma) / Math.sqrt(n) / frame.scale)
+  }
+  return 0.15
+}
+
+/** "the bed", or "your chair" for one of the student's own things. */
+const the = (name: string) => (name.startsWith('your ') ? name : `the ${name}`)
+
+/** How a held thing fits, in a sentence: what it runs into, or how much room it has round it. */
+function fitText(fit: Fit | null): string {
+  if (!fit) return 'Drag it across the floor; the arrows turn it.'
+  const cm = (metres: number) => `${Math.round(metres * 100)} cm`
+  if (fit.into) return `It runs ${cm(fit.into.depth)} into ${the(fit.into.name)}.`
+  const near = fit.nearest ? `${cm(fit.nearest.gap)} to ${the(fit.nearest.name)}, ` : ''
+  return `It fits: ${near}${cm(fit.wall)} to the nearest wall.`
+}
 
 /** room-objects.json: the furniture SAM 3.1 found, each as a block in the upright room (metres). */
 type RoomObjects = {
@@ -40,6 +91,10 @@ function fetchJson<T>(url: string): Promise<T | null> {
 }
 
 const LABELS: Record<Look, string> = { rebuilt: 'Rebuilt', real: 'Real', walk: 'Walk', solid: 'Solid', dots: 'Dots' }
+// The looks a visitor picks between are the room rebuilt and the room as filmed (the owner, Nov 2: too many modes).
+// Walk, Solid and Dots were steps on the way there: they show with ?debug in the address, or for a room that has
+// neither of the two
+const DEBUG = new URLSearchParams(window.location.search).has('debug')
 
 // One WebGL renderer and one Spark renderer for the whole app. Spark keeps shared GPU data tied to the renderer it
 // first draws with, so a viewer that made its own renderer (React builds effects twice in development, and every
@@ -51,6 +106,7 @@ function sharedRenderer() {
     // Spark asks for anti-aliasing off: it doesn't improve splats and costs a lot of speed (VR needs the speed)
     const renderer = new THREE.WebGLRenderer({ antialias: false })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    renderer.xr.enabled = true // a headset's browser can step into the room (walk/vr.ts)
     shared = { renderer, spark: new SparkRenderer({ renderer }) }
   }
   return shared
@@ -97,6 +153,11 @@ export default function RoomViewer({ url }: { url: string }) {
   const [state, setState] = useState<'loading' | 'ready' | 'error'>('loading')
   const [picked, setPicked] = useState(0)
   const [distance, setDistance] = useState<number | null>(null)
+  const [toCeiling, setToCeiling] = useState(false) // the measurement reaches a ceiling whose height was assumed
+  const scaleRef = useRef(1) // real metres per room unit
+  const [roomSize, setRoomSize] = useState<MeasuredRoom | null>(null)
+  const [issuesOpen, setIssuesOpen] = useState(false)
+  const issueMarks = useRef<THREE.Group | null>(null) // red boxes (damage) and yellow outlines (never filmed)
   const [dots, setDots] = useState(1)
   const [look, setLook] = useState<Look>('real')
   const [hasSplats, setHasSplats] = useState(false)
@@ -110,13 +171,108 @@ export default function RoomViewer({ url }: { url: string }) {
   const [photoWalls, setPhotoWalls] = useState(false) // the Rebuilt look showing the filmed walls instead
   const [moving, setMoving] = useState(false)
   const [held, setHeld] = useState<string | null>(null)
+  const [fit, setFit] = useState<Fit | null>(null) // how the held thing sits among the others
+  const [itemsOpen, setItemsOpen] = useState(false) // the Rebuilt look's "Your things" panel
+  const [canVr, setCanVr] = useState(false) // this browser can start VR (a headset's browser)
+  const [inVr, setInVr] = useState(false)
+  const [vrError, setVrError] = useState<string | null>(null)
+  const vrRef = useRef<Vr | null>(null)
+  const lightModels = useRef(false) // a headset's browser: the lighter copies of the models
+  // The room's API address (/api/requests/{id}), from its room.ply URL: the student's things live under it
+  const itemsBase = url.split('?')[0].replace('/room.ply', '')
   const showing = pick(look, hasSplats, hasSurface, hasWalk, hasRebuilt)
   const available: Record<Look, boolean> = { rebuilt: hasRebuilt, real: hasSplats, walk: hasWalk, solid: hasSurface, dots: true }
-  const looks = (['rebuilt', 'real', 'walk', 'solid', 'dots'] as const).filter(option => available[option])
+  const main = (['rebuilt', 'real'] as const).filter(option => available[option])
+  const looks: Look[] = main.length && !DEBUG
+    ? main
+    : (['rebuilt', 'real', 'walk', 'solid', 'dots'] as const).filter(option => available[option])
 
   useEffect(() => {
     if (material.current) material.current.size = baseSize.current * dots
   }, [dots, state])
+
+  useEffect(() => {
+    let gone = false
+    const check = () => {
+      vrSupported().then(yes => {
+        if (!gone) setCanVr(yes)
+      })
+    }
+    check()
+    navigator.xr?.addEventListener('devicechange', check) // a headset plugged in after the page loaded
+    return () => {
+      gone = true
+      navigator.xr?.removeEventListener('devicechange', check)
+    }
+  }, [])
+
+  // The issues in 3D: a red box round each damage flag (at least 10 cm a side, so a small stain still shows) and a
+  // yellow outline over each patch never filmed, drawn over everything so they show through the furniture
+  const showIssues = (report: IssuesReport) => {
+    const host = rebuiltGroup.current?.parent
+    if (!host || issueMarks.current) return
+    const marks = new THREE.Group()
+    for (const flag of report.flags) {
+      if (flag.kind === 'damage' && flag.position) {
+        const size = (flag.size ?? [0.1, 0.1, 0.1]).map(side => Math.max(side, 0.1))
+        const box = new THREE.BoxGeometry(size[0], size[1], size[2])
+        const fill = new THREE.Mesh(box, new THREE.MeshBasicMaterial({ color: '#ef4444', transparent: true, opacity: 0.25, depthTest: false }))
+        fill.add(new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: '#dc2626', depthTest: false })))
+        fill.position.fromArray(flag.position)
+        fill.renderOrder = 10
+        marks.add(fill)
+      } else if (flag.kind === 'not filmed' && (flag.fill || flag.corners?.length === 4)) {
+        // Its own shape when the report has it (cells on a grid over the wall, and its edge), else its bounding box
+        const v = (array: number[]) => new THREE.Vector3().fromArray(array)
+        const quads: THREE.Vector3[][] = flag.fill
+          ? flag.fill.cells.map(([row, col]) => {
+            const { origin, across, down } = flag.fill!
+            const at = v(origin).addScaledVector(v(across), col).addScaledVector(v(down), row)
+            return [at, at.clone().add(v(across)), at.clone().add(v(across)).add(v(down)), at.clone().add(v(down))]
+          })
+          : [flag.corners!.map(v)]
+        const fill = new THREE.BufferGeometry().setFromPoints(quads.flatMap(q => [q[0], q[1], q[2], q[0], q[2], q[3]]))
+        const patch = new THREE.Mesh(fill, new THREE.MeshBasicMaterial({ color: '#facc15', transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthTest: false }))
+        const edge = (flag.outline?.length ? flag.outline : flag.corners ?? []).map(v)
+        patch.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(edge), new THREE.LineBasicMaterial({ color: '#eab308', depthTest: false })))
+        patch.renderOrder = 10
+        marks.add(patch)
+      }
+    }
+    marks.visible = false
+    host.add(marks)
+    issueMarks.current = marks
+  }
+  useEffect(() => {
+    if (issueMarks.current) issueMarks.current.visible = issuesOpen && showing === 'rebuilt'
+  }, [issuesOpen, showing])
+
+  // One of the student's things, built (its own middle at x = z = 0 and its bottom at y = 0, in the room's units):
+  // square to the walls, on the free floor nearest the room's middle (the middle itself when nowhere is free), shown
+  // with the rebuilt things and picked up like them
+  const placeItem = (item: Item) => {
+    const group = rebuiltGroup.current
+    const shell = shellMesh.current
+    if (!group || !shell) return
+    fetchModel(`${itemsBase}/items/${item.id}/`, 'item.ply', lightModels.current).then(async response => {
+      if (!response) return
+      const geometry = new PLYLoader().parse(await response.arrayBuffer())
+      geometry.computeVertexNormals()
+      geometry.computeBoundingBox()
+      const size = geometry.boundingBox!.getSize(new THREE.Vector3())
+      const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
+      mesh.name = `your ${item.name}`
+      const yawDegrees = -THREE.MathUtils.radToDeg(shell.rotation.y)
+      const spot = rebuiltMovable.current?.freeSpot([size.x, size.y, size.z], yawDegrees)
+        ?? [shell.position.x, size.y / 2, shell.position.z]
+      mesh.position.set(spot[0], 0, spot[2])
+      mesh.rotation.y = shell.rotation.y
+      group.add(mesh)
+      rebuiltMovable.current?.add({
+        name: mesh.name, object: mesh, centre: [spot[0], size.y / 2, spot[2]], size: [size.x, size.y, size.z], yawDegrees,
+      })
+    })
+  }
 
   // The Rebuilt look wears the clean materials, unless "Photo walls" is on; every other look wears the filmed walls
   // (with the window, door and the rest cut out onto them)
@@ -177,9 +333,8 @@ export default function RoomViewer({ url }: { url: string }) {
     // where it is instead of swinging round into places no frame was filmed from. The wheel walks forward and back.
     const controls = new OrbitControls(camera, renderer.domElement)
     // In development only: the camera and scene on window, so a browser console can check where the viewer stands
-    if ((import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV) {
-      Object.assign(window, { sightseen: { camera, controls, scene } })
-    }
+    const dev = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV
+    if (dev) Object.assign(window, { sightseen: { camera, controls, scene } })
     controls.enableDamping = true
     controls.enableZoom = false
     controls.rotateSpeed = -0.35 // drag the room the way you'd turn your head
@@ -198,6 +353,7 @@ export default function RoomViewer({ url }: { url: string }) {
     const marks = new THREE.Group()
     scene.add(marks)
     const points: THREE.Vector3[] = []
+    const onCeiling: boolean[] = [] // each point: on a ceiling whose height was assumed
     let cloud: THREE.Points | null = null
     let surface: THREE.Mesh | null = null
     let shell: THREE.Mesh | null = null
@@ -211,6 +367,32 @@ export default function RoomViewer({ url }: { url: string }) {
     const assets = url.split('?')[0].replace('/room.ply', '/assets/')
     const room = new THREE.Group()
     scene.add(room)
+
+    // VR: the Rebuilt look at its real size, standing where the video began and looking where it first looked (the
+    // room's middle when there's no camera path); the start card says how big the room is and how sure that is
+    let vrSpot: { stand: THREE.Vector3; ahead: THREE.Vector3 } | null = null
+    let vrAbout: string[] = ['This room, at its real size']
+    const vr = makeVr(renderer, scene, {
+      start: () => {
+        const spot = vrSpot ?? (shell ? { stand: shell.position.clone(), ahead: new THREE.Vector3(0, 0, -1) } : null)
+        return spot && { ...spot, scale: scaleRef.current, about: vrAbout }
+      },
+      targets: () => [rebuiltGroup.current, shell].filter(part => part !== null) as THREE.Object3D[],
+      walkable: point => {
+        if (!shell) return true
+        const local = shell.worldToLocal(point.clone())
+        const { width, depth } = (shell.geometry as THREE.BoxGeometry).parameters
+        const margin = 0.15 / scaleRef.current // the head stays 15 cm off the walls
+        return Math.abs(local.x) <= width / 2 - margin && Math.abs(local.z) <= depth / 2 - margin
+      },
+      onChange: on => {
+        spark.visible = !on // VR shows the Rebuilt look only: the splats' renderer sits out, and the headset keeps its frames
+        setInVr(on)
+        if (on) setVrError(null)
+      },
+    })
+    vrRef.current = vr
+    if (dev) Object.assign(window, { sightseen: { camera, controls, scene, vr } })
 
     // Splats come out of training in OpenCV axes (y down, z away from the camera); a half turn about x puts them
     // in three.js axes, the same flip the surface and points already had
@@ -256,14 +438,28 @@ export default function RoomViewer({ url }: { url: string }) {
       fetchJson<CameraSpot[]>(url.replace('/room.ply', '/cameras.json')),
       fetchJson<RoomShell>(url.replace('/room.ply', '/room-shell.json')),
       fetchJson<RoomObjects>(url.replace('/room.ply', '/room-objects.json')),
-    ]).then(([frame, path, found, objects]) => {
+      vrSupported(),
+    ]).then(([frame, path, found, objects, headset]) => {
       if (disposed) return
+      lightModels.current = headset
       if (frame) {
         const [w, x, y, z] = frame.quaternion
         room.quaternion.set(x, y, z, w)
         room.position.set(0, -frame.floorHeight, 0)
       }
+      if (frame) scaleRef.current = frame.scale || 1
       if (frame && found) {
+        const scale = frame.scale || 1
+        setRoomSize({ width: found.size[0] * scale, length: found.size[2] * scale, height: found.size[1] * scale,
+          heightAssumed: found.ceilingAssumed === true, source: scaleSource(frame), tolerance: areaTolerance(frame) })
+        const floorSize = `${(found.size[0] * scale).toFixed(2)} × ${(found.size[2] * scale).toFixed(2)} m`
+        vrAbout = [
+          'This room, at its real size',
+          found.ceilingAssumed
+            ? `About ${floorSize}; the ceiling wasn't filmed (${(found.size[1] * scale).toFixed(2)} m assumed)`
+            : `About ${floorSize}, ${(found.size[1] * scale).toFixed(2)} m tall`,
+          `Size: ${scaleSource(frame)}`,
+        ]
         // The shell: one box seen from inside, its faces in BoxGeometry's order (+x, -x, +y, -y, +z, -z). It's
         // opaque, so anything the splats smeared beyond the walls is hidden behind it.
         const [width, height, length] = found.size
@@ -302,6 +498,8 @@ export default function RoomViewer({ url }: { url: string }) {
         }, () => {})
         shell.position.set(found.centre[0], found.centre[1], found.centre[2])
         shell.rotation.y = -THREE.MathUtils.degToRad(found.yawDegrees)
+        shell.userData.gap = SHELL_GAP // VR's measuring puts its marks back on the found walls
+        shell.userData.ceilingAssumed = found.ceilingAssumed === true
         shell.visible = shown.current !== 'dots'
         shellMesh.current = shell
         scene.add(shell)
@@ -336,7 +534,10 @@ export default function RoomViewer({ url }: { url: string }) {
           things.add(furniture)
         }, () => {})
         // The room's things rebuilt whole by SAM 3D, when this room has them: the Rebuilt look, shown first
-        loadRebuilt(assets, scene, camera, renderer.domElement, found, name => setHeld(name)).then(rebuilt => {
+        loadRebuilt(assets, scene, camera, renderer.domElement, found, (name, fits) => {
+          setHeld(name)
+          setFit(fits ?? null)
+        }, () => scaleRef.current, headset).then(rebuilt => {
           if (!rebuilt) return
           if (disposed) {
             rebuilt.movable.dispose()
@@ -352,8 +553,10 @@ export default function RoomViewer({ url }: { url: string }) {
         }, () => {})
       }
       // The room's things as movable pieces (the same splats, split by SAM 3.1), when the room has them
-      movableThings(assets, room, scene, camera, renderer.domElement, frame && found ? found : null,
-        name => setHeld(name), () => refreshSplats.current()).then(pieces => {
+      movableThings(assets, room, scene, camera, renderer.domElement, frame && found ? found : null, (name, fits) => {
+        setHeld(name)
+        setFit(fits ?? null)
+      }, () => refreshSplats.current(), () => scaleRef.current).then(pieces => {
         if (!pieces) return
         if (disposed) {
           pieces.dispose()
@@ -383,6 +586,7 @@ export default function RoomViewer({ url }: { url: string }) {
         camera.position.set(0, 0, 0) // older rooms: their space starts at the first frame's camera
       }
       camera.position.applyMatrix4(room.matrixWorld)
+      if (first) vrSpot = { stand: camera.position.clone(), ahead: new THREE.Vector3(0, 0, -1).applyQuaternion(facing) }
       controls.target.copy(camera.position).add(new THREE.Vector3(0, 0, -0.01).applyQuaternion(facing))
       controls.update()
       requestAnimationFrame(() => refreshSplats.current())
@@ -435,19 +639,30 @@ export default function RoomViewer({ url }: { url: string }) {
         -((e.clientY - rect.top) / rect.height) * 2 + 1,
       )
       raycaster.setFromCamera(ndc, camera)
-      const hit = raycaster.intersectObject(shown.current !== 'dots' && surface ? surface : cloud)[0]
+      // The Rebuilt look measures what it draws (its things and walls, meshes only: a grey box's edge lines would
+      // catch a click a unit away); the other looks measure the filmed surface, steadier than a blurry splat
+      const drawn = shown.current === 'rebuilt'
+        ? [rebuiltGroup.current, shell].filter(part => part !== null) as THREE.Object3D[]
+        : null
+      const hit = drawn
+        ? raycaster.intersectObjects(drawn, true).find(found => found.object instanceof THREE.Mesh)
+        : raycaster.intersectObject(shown.current !== 'dots' && surface ? surface : cloud)[0]
       if (!hit) return
+      const point = markPoint(hit)
       if (points.length === 2) {
         points.length = 0
+        onCeiling.length = 0
         marks.clear()
       }
-      points.push(hit.point.clone())
+      points.push(point)
+      onCeiling.push(onAssumedCeiling(hit))
       const marker = new THREE.Mesh(new THREE.SphereGeometry(markerRadius, 16, 12), new THREE.MeshBasicMaterial({ color: MARK }))
-      marker.position.copy(hit.point)
+      marker.position.copy(point)
       marks.add(marker)
       if (points.length === 2) {
         marks.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: MARK })))
-        setDistance(points[0].distanceTo(points[1]))
+        setDistance(points[0].distanceTo(points[1]) * scaleRef.current)
+        setToCeiling(onCeiling.some(Boolean))
       } else {
         setDistance(null)
       }
@@ -470,6 +685,7 @@ export default function RoomViewer({ url }: { url: string }) {
 
     clear.current = () => {
       points.length = 0
+      onCeiling.length = 0
       marks.clear()
       setPicked(0)
       setDistance(null)
@@ -483,17 +699,24 @@ export default function RoomViewer({ url }: { url: string }) {
     })
     resize.observe(el)
 
-    let frame = 0
-    const loop = () => {
-      frame = requestAnimationFrame(loop)
-      controls.update()
-      renderer.render(scene, camera)
-    }
-    loop()
+    // One loop for the screen and the headset: three.js runs it at the headset's rate while VR is on
+    let last = -1
+    renderer.setAnimationLoop(time => {
+      const seconds = last < 0 ? 0 : Math.min(0.1, (time - last) / 1000)
+      last = time
+      if (renderer.xr.isPresenting) {
+        vr.render(seconds)
+      } else {
+        controls.update()
+        renderer.render(scene, camera)
+      }
+    })
 
     return () => {
       disposed = true
-      cancelAnimationFrame(frame)
+      renderer.setAnimationLoop(null)
+      vr.dispose()
+      vrRef.current = null
       resize.disconnect()
       renderer.domElement.removeEventListener('pointerdown', onDown)
       renderer.domElement.removeEventListener('pointerup', onUp)
@@ -503,6 +726,11 @@ export default function RoomViewer({ url }: { url: string }) {
       movable.current = null
       rebuiltMovable.current?.dispose()
       rebuiltMovable.current = null
+      if (issueMarks.current) {
+        issueMarks.current.parent?.remove(issueMarks.current)
+        disposeTree(issueMarks.current)
+        issueMarks.current = null
+      }
       if (rebuiltGroup.current) scene.remove(rebuiltGroup.current)
       rebuiltGroup.current = null
       rebuiltTint.current = null
@@ -555,7 +783,7 @@ export default function RoomViewer({ url }: { url: string }) {
         {state === 'ready' && moving && (
           <span className="inline-flex items-center gap-1.5">
             <Hand size={15} />
-            {held ? `Moving the ${held}. Drag it across the floor.` : 'Click a thing and drag it across the floor.'}
+            {held ? `Moving ${the(held)}. ${fitText(fit)}` : 'Click a thing and drag it across the floor.'}
           </span>
         )}
         {state === 'ready' && !moving && notFilmed && showing === 'rebuilt' && (
@@ -569,7 +797,16 @@ export default function RoomViewer({ url }: { url: string }) {
             <Ruler size={15} />
             {picked === 0 && 'Click two points to measure between them.'}
             {picked === 1 && 'Now click the second point.'}
-            {picked === 2 && distance !== null && `${distance.toFixed(2)} m (${Math.round(distance * 100)} cm)`}
+            {picked === 2 && distance !== null && `${distance.toFixed(2)} m (${Math.round(distance * 100)} cm)${toCeiling ? "; the ceiling's height is assumed" : ''}`}
+          </span>
+        )}
+        {vrError && <span className="mt-1 block text-xs text-red-300">{vrError}</span>}
+        {state === 'ready' && roomSize && picked === 0 && !moving && (
+          <span className="mt-1 block text-xs text-white/80">
+            Room about {roomSize.width.toFixed(2)} × {roomSize.length.toFixed(2)} m
+            {roomSize.heightAssumed
+              ? ` (the ceiling wasn't filmed: ${roomSize.height.toFixed(2)} m assumed)`
+              : `, ${roomSize.height.toFixed(2)} m tall`}; {roomSize.source}.
           </span>
         )}
       </div>
@@ -582,11 +819,56 @@ export default function RoomViewer({ url }: { url: string }) {
           <X size={15} /> Clear
         </button>
       )}
+      {state === 'ready' && hasRebuilt && (
+        <YourThings base={itemsBase} open={itemsOpen && showing === 'rebuilt'} onClose={() => setItemsOpen(false)}
+          onReady={placeItem} />
+      )}
+      {state === 'ready' && hasRebuilt && (
+        <Issues base={itemsBase} open={issuesOpen && showing === 'rebuilt'} onClose={() => setIssuesOpen(false)}
+          onReport={showIssues} room={roomSize} />
+      )}
       <p className="pointer-events-none absolute bottom-3 left-3 text-xs text-white/70">
         Drag to look around, scroll to walk, right-drag to step sideways.
       </p>
       {state === 'ready' && (
         <div className="absolute bottom-3 right-3 flex items-center gap-2">
+          {hasRebuilt && showing === 'rebuilt' && (
+            <button
+              type="button"
+              onClick={() => {
+                setItemsOpen(!itemsOpen)
+                setIssuesOpen(false)
+              }}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs ${itemsOpen ? 'bg-emerald-500 text-white' : 'bg-black/60 text-white hover:bg-black/80'}`}
+            >
+              <Package size={14} /> Your things
+            </button>
+          )}
+          {hasRebuilt && showing === 'rebuilt' && (
+            <button
+              type="button"
+              onClick={() => {
+                setIssuesOpen(!issuesOpen)
+                setItemsOpen(false)
+              }}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs ${issuesOpen ? 'bg-red-500 text-white' : 'bg-black/60 text-white hover:bg-black/80'}`}
+            >
+              <AlertTriangle size={14} /> Issues
+            </button>
+          )}
+          {canVr && hasRebuilt && showing === 'rebuilt' && (
+            <button
+              type="button"
+              disabled={inVr}
+              onClick={() => {
+                setVrError(null)
+                vrRef.current?.enter().catch(() => setVrError("VR didn't start. Try again, or reload the page."))
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-2 text-xs text-white hover:bg-indigo-600 disabled:opacity-60"
+            >
+              <Glasses size={14} /> {inVr ? 'In VR' : 'Enter VR'}
+            </button>
+          )}
           {hasRebuilt && showing === 'rebuilt' && hasMaterials && (
             <button
               type="button"
@@ -624,13 +906,25 @@ export default function RoomViewer({ url }: { url: string }) {
               >
                 <Hand size={14} /> Move things
               </button>
+              {moving && held && showing === 'rebuilt' && (
+                <>
+                  <button type="button" onClick={() => rebuiltMovable.current?.turn(15)}
+                    className="px-2 py-2 hover:bg-black/40" aria-label="Turn anticlockwise" title="Turn 15° anticlockwise">
+                    <RotateCcw size={14} />
+                  </button>
+                  <button type="button" onClick={() => rebuiltMovable.current?.turn(-15)}
+                    className="px-2 py-2 hover:bg-black/40" aria-label="Turn clockwise" title="Turn 15° clockwise">
+                    <RotateCw size={14} />
+                  </button>
+                </>
+              )}
               {moving && (
                 <button
                   type="button"
                   onClick={() => (showing === 'rebuilt' ? rebuiltMovable.current : movable.current)?.reset()}
                   className="inline-flex items-center gap-1.5 px-3 py-2 hover:bg-black/40"
                 >
-                  <RotateCcw size={14} /> Put back
+                  <Undo2 size={14} /> Put back
                 </button>
               )}
             </div>

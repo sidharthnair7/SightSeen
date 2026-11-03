@@ -1,7 +1,8 @@
 """SAM 3D Objects (Meta) on this PC's 8 GB RTX 3070, for rebuild_things.py's build step when there's no paid GPU. Meta
 says the model needs 32 GB; it fits in 8 because only the part that's working sits on the card: every model loads
-into ordinary memory (the two big flow transformers and the image encoders in bfloat16, which they compute in
-anyway), and each step of the pipeline moves its own models onto the card and back off when it's done: the sparse
+into ordinary memory (the two big flow transformers and the image encoders in float16, the dtype SAM 3D's own
+pipeline.yaml runs in; bfloat16 broke the detail step, whose sparse convolutions (spconv) know only float16 and
+float32), and each step of the pipeline moves its own models onto the card and back off when it's done: the sparse
 structure step (its generator, decoder and image encoder), then the detail step (its generator and encoder), then the
 decoders. The depth model never moves: the room's own depth is handed in as the pointmap.
 
@@ -9,7 +10,8 @@ Runs inside WSL, in the conda env from SAM 3D's doc/setup.md (~/sam3d, made by w
     python worker/sam3d_local.py <jobs.json>
 jobs.json: {"jobs": [{"photo": png, "outlines": [png, ...], "pointmap": npz, "out": folder}], "seed": 42}, paths as
 WSL sees them. Each outline's result goes to <out>/<n>.npz (vertices in the photo's OpenCV camera axes, faces,
-colours) and <out>/<n>.json (SAM 3D's layout, seconds, the card's peak memory, or the error). The weights come from
+colours, and "canonical": the object in its own axes, z up, before its layout) and <out>/<n>.json (SAM 3D's
+layout, seconds, the card's peak memory, or the error). The weights come from
 Hugging Face the first time (gated: HF_TOKEN in the repo's .env, after Meta approves the request).
 """
 import json
@@ -22,7 +24,7 @@ os.environ.setdefault("LIDRA_SKIP_INIT", "true")  # as SAM 3D's notebook/inferen
 SAM3D = Path.home() / "sam3d" / "sam-3d-objects"
 WEIGHTS = Path.home() / "sam3d" / "weights"
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
-BIG = 200_000_000  # parameters: models this size or bigger are kept in bfloat16
+BIG = 200_000_000  # parameters: models this size or bigger are kept in float16
 sys.path.append(str(SAM3D / "notebook"))
 
 import numpy as np  # noqa: E402
@@ -76,7 +78,7 @@ def _load(config_file):
             model = base.load_model_from_checkpoint(model, ckpt_path, strict=True, device="cpu", freeze=True, eval=True,
                                                     state_dict_key=state_dict_key, state_dict_fn=state_dict_fn)
         if sum(p.numel() for p in model.parameters()) >= BIG:
-            model = model.to(torch.bfloat16)
+            model = model.to(torch.float16)
         return model
 
     base.InferencePipeline.instantiate_and_load_from_pretrained = into_memory
@@ -113,6 +115,24 @@ def _load(config_file):
                 torch.cuda.empty_cache()
 
         setattr(pipeline, name, on_card)
+
+    # A photo with no room depth (one of the student's own things): SAM 3D's depth model makes it, on the card for that
+    # step only
+    depth = getattr(pipeline, "depth_model", None)
+    if isinstance(depth, torch.nn.Module):
+        compute = pipeline.compute_pointmap
+
+        def compute_on_card(image, pointmap=None, _compute=compute):
+            if pointmap is not None:
+                return _compute(image, pointmap)
+            depth.to("cuda")
+            try:
+                return _compute(image, None)
+            finally:
+                depth.to("cpu")
+                torch.cuda.empty_cache()
+
+        pipeline.compute_pointmap = compute_on_card
     return pipeline
 
 
@@ -133,8 +153,11 @@ def _run(pipeline, photo, outline, pointmap, seed):
         quat_l2c=output["rotation"], trans_l2c=output["translation"], scale_l2c=output["scale"])
     in_camera = cloud.points_list()[0].detach().cpu().numpy() * np.array([-1.0, -1.0, 1.0])  # PyTorch3D to OpenCV
     layout = {k: output[k].detach().float().cpu().numpy().tolist() for k in ("rotation", "translation", "scale")}
+    # its own axes, before its layout moves it: SAM 3D's mesh stands along y (take 4's suitcase: 1.0 tall along y);
+    # turned like TRELLIS's, standing along z, so place() and items.py read both the same way
+    canonical = local.astype(np.float32)
     return in_camera.astype(np.float32), np.asarray(mesh.faces, np.int32), \
-        np.asarray(mesh.visual.vertex_colors)[:, :3].astype(np.uint8), layout
+        np.asarray(mesh.visual.vertex_colors)[:, :3].astype(np.uint8), layout, canonical
 
 
 def main():
@@ -159,8 +182,8 @@ def main():
             torch.cuda.reset_peak_memory_stats()
             began = time.perf_counter()
             try:
-                vertices, faces, colours, layout = _run(pipeline, photo, outline, pointmap, seed)
-                np.savez(out / f"{n}.npz", vertices=vertices, faces=faces, colours=colours)
+                vertices, faces, colours, layout, canonical = _run(pipeline, photo, outline, pointmap, seed)
+                np.savez(out / f"{n}.npz", vertices=vertices, faces=faces, colours=colours, canonical=canonical)
                 result = {"vertices": len(vertices), "layout": layout}
             except Exception as error:
                 result = {"error": f"{type(error).__name__}: {error}"[:800]}

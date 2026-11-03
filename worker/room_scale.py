@@ -1,21 +1,28 @@
 """The room's real size, checked against things that come in standard sizes (the design in the README: outlets and
-switches of known size check the room's scale). The 3D step's metric depth can be off by a constant factor (take 4
-came out about 1.3x too small: a 74 cm desk top at 54 cm), and pictures can't show it: the same room twice as big,
+switches of known size check the room's scale). The 3D step's metric depth can be off by a constant factor (take 4's
+desk top came out 54 cm high, where desks are usually 72 to 76 cm), and pictures can't show it: the same room twice as big,
 filmed from twice as far, looks the same. A wall plate can: a standard North American single switch or outlet plate
 is 4.5 x 2.75 inches (11.4 x 7.0 cm).
 
 SAM 3.1 (Meta Model API) outlines every light switch and outlet in every frame; rays through each outline hit the fused
 surface; the plate's height and width are measured along the wall (up, and across) from the hits, edge to edge (the
-outer 1% each side trimmed as noise, then the 98% that's left widened back to the whole). The scale is the median of
-standard / measured over every plate seen, in both directions. Plates more than 40% off the median are left out (a
-double plate, a bad outline).
+outer 1% each side trimmed as noise, then the 98% that's left widened back to the whole). Outlines landing within
+MERGE of each other are one plate (seen in several frames, or outlined twice in one), measured by their medians; a
+plate measuring under half or over twice its standard size is a bad outline (or not one plate) and is left out. The
+scale is the median of standard / measured over the plates left, in both directions; how sure it is counts plates,
+not outlines (a plate's height and width share its errors).
 
-Writes "scale" (and the evidence) into room-frame.json, which the viewer applies to the whole room.
+Writes "scale" (and the evidence) into room-frame.json, which the viewer applies to the whole room. The owner's tape
+measure beats the plates: `set` takes one real length (the room's width or length, the desk's or the bed's height)
+and makes everything the scale sizes again (the shell's assumed ceiling, its wall photos and materials, the splats).
     python worker/room_scale.py <request folder>
+    python worker/room_scale.py set <request folder> desk-height 0.74
+    python worker/room_scale.py rebuild <request folder>
 Costs two image calls per frame: about 20 cents for 37 frames.
 """
 import json
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -29,7 +36,10 @@ from sam_check import load_env
 PLATE = (0.114, 0.070)  # metres: a standard single-gang wall plate, tall x wide
 PHRASES = ("light switch", "electrical outlet")
 TRIM = 1  # percent trimmed off each side of a plate's hits as edge noise (then widened back)
-AGREE = 0.4  # plates more than this share off the median ratio are left out
+MERGE = 0.3  # room units: outlines whose middles are closer are the same plate (plates sit further apart than this)
+BELIEVABLE = (0.5, 2.0)  # standard / measured for a real plate: MapAnything's own scale is never off by 2x
+SENSIBLE = {"room-width": (1.5, 15.0), "room-length": (1.5, 15.0), "desk-height": (0.4, 1.2), "bed-height": (0.15, 1.0)}
+TYPES = {"x": "<f4", "y": "<f4", "z": "<f4", "red": "u1", "green": "u1", "blue": "u1", "seen": "u1"}
 
 
 def measure(out):
@@ -53,7 +63,7 @@ def measure(out):
             answers[f"{name}|{phrase}"] = text
     answers_file.write_text(json.dumps(answers))
 
-    plates = []
+    sightings = []
     for camera in cameras:
         height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
         for phrase in PHRASES:
@@ -83,28 +93,158 @@ def measure(out):
                     return (high - low) / spread
 
                 tall, wide = extent(centred[:, 1]), extent(centred @ across)
-                plates.append({"frame": camera["name"], "phrase": phrase, "tall": round(float(tall), 4),
-                               "wide": round(float(wide), 4), "height": round(float(points[:, 1].mean()), 3),
-                               "pixels": int(mask.sum())})
-    ratios = [PLATE[0] / p["tall"] for p in plates] + [PLATE[1] / p["wide"] for p in plates]
-    if not ratios:
-        return {"scale": None, "plates": [], "why": "no whole wall plate was found"}
-    middle = float(np.median(ratios))
-    kept = [r for r in ratios if abs(r / middle - 1) <= AGREE]
-    scale = round(float(np.median(kept)), 4)
+                sightings.append({"frame": camera["name"], "phrase": phrase, "tall": float(tall), "wide": float(wide),
+                                  "middle": points.mean(axis=0), "pixels": int(mask.sum())})
+
+    # One plate however often it was seen or outlined: the sightings grouped by where they are, the biggest first
+    plates = []
+    for sighting in sorted(sightings, key=lambda s: -s["pixels"]):
+        home = next((p for p in plates if np.linalg.norm(p["middle"] - sighting["middle"]) < MERGE), None)
+        if home:
+            home["seen"].append(sighting)
+        else:
+            plates.append({"middle": sighting["middle"], "seen": [sighting]})
+    readings, report = [], []
+    for plate in plates:
+        tall = float(np.median([s["tall"] for s in plate["seen"]]))
+        wide = float(np.median([s["wide"] for s in plate["seen"]]))
+        ratios = [PLATE[0] / tall, PLATE[1] / wide]
+        kept = all(BELIEVABLE[0] <= r <= BELIEVABLE[1] for r in ratios)
+        if kept:
+            readings += ratios
+        report.append({"phrases": sorted({s["phrase"] for s in plate["seen"]}),
+                       "frames": sorted({s["frame"] for s in plate["seen"]}), "outlines": len(plate["seen"]),
+                       "tall": round(tall, 4), "wide": round(wide, 4), "ratios": [round(r, 3) for r in ratios],
+                       "height": round(float(plate["middle"][1]), 3), "kept": kept})
+    if not readings:
+        return {"scale": None, "plates": report, "why": "no wall plate of a believable size was found"}
+    scale = round(float(np.median(readings)), 4)
+    count = sum(p["kept"] for p in report)
+    evidence = {"standard": "wall plate 11.4 x 7.0 cm", "plates": count, "outlines": len(sightings),
+                "ratiosKept": count,  # independent readings: one a plate
+                "spread": [round(float(np.percentile(readings, 25)), 3), round(float(np.percentile(readings, 75)), 3)],
+                "readings": [round(r, 3) for r in readings]}
     frame_file = out / "room-frame.json"
     frame = json.loads(frame_file.read_text())
-    frame["scale"] = scale
-    frame["scaleEvidence"] = {"standard": "wall plate 11.4 x 7.0 cm", "plates": len(plates), "ratiosKept": len(kept),
-                              "spread": [round(float(np.percentile(kept, 25)), 3), round(float(np.percentile(kept, 75)), 3)]}
+    before = frame.get("scale")
+    if (frame.get("scaleEvidence") or {}).get("source") == "tape measure":
+        frame["plateCheck"] = {"scale": scale, **evidence}  # the tape measure beats the plates: kept beside it
+    else:
+        frame["scale"] = scale
+        frame["scaleEvidence"] = evidence
     frame_file.write_text(json.dumps(frame, indent=2))
-    return {"scale": scale, "plates": plates, "ratios": [round(r, 3) for r in ratios]}
+    if frame["scale"] != before:
+        _rescale_items(out, frame["scale"])
+    return {"scale": frame["scale"], "plateScale": scale, "before": before, "plates": report}
+
+
+def _rescale_items(out, scale):
+    """The student's things were built in the room's units at the scale then: a new scale sizes them again, so each
+    stays its real size (their PLYs' points scaled in place, item.json's room units and scale updated)."""
+    import items
+
+    for meta_file in sorted((out / "items").glob("*/item.json")) if (out / "items").exists() else []:
+        meta = json.loads(meta_file.read_text())
+        ply = meta_file.parent / "item.ply"
+        was = meta.get("roomScale")
+        if meta.get("status") != "done" or not was or not ply.exists() or abs(was - scale) < 1e-9:
+            continue
+        factor = was / scale
+        data = bytearray(ply.read_bytes())
+        end = data.index(b"end_header\n") + len(b"end_header\n")
+        header = data[:end].decode("ascii").splitlines()
+        names = [line.split()[2] for line in header if line.startswith("property") and "list" not in line]
+        count = int(next(line.split()[2] for line in header if line.startswith("element vertex")))
+        kind = np.dtype([(n, TYPES[n]) for n in names])
+        vertex = np.frombuffer(bytes(data[end:end + count * kind.itemsize]), dtype=kind).copy()
+        for axis in "xyz":
+            vertex[axis] *= factor
+        data[end:end + count * kind.itemsize] = vertex.tobytes()
+        ply.write_bytes(bytes(data))
+        items._status(meta_file.parent, roomScale=scale,
+                      sizeUnits=[round(v * factor, 4) for v in meta.get("sizeUnits", [])])
+
+
+def _metres(text):
+    """A length as typed: '0.74' or '0.74m' (metres), '74cm' or '74 cm' (centimetres)."""
+    match = re.fullmatch(r"\s*([0-9]*\.?[0-9]+)\s*(cm|m)?\s*", str(text).lower())
+    if not match:
+        raise SystemExit(f"'{text}' isn't a length: give metres (0.74) or centimetres (74cm)")
+    value = float(match.group(1))
+    return value / 100 if match.group(2) == "cm" else value
+
+
+KNOWN = ("room-width", "room-length", "desk-height", "bed-height")  # what a tape measure can set the scale from
+
+
+def _known_length(out, what):
+    """How long `what` is in the room's own units: the shell's width or length, or the top of a stand-in's surface (the
+    desk's, the bed's) from things/stand-ins.json."""
+    if what in ("room-width", "room-length"):
+        shell = json.loads((out / "room-shell.json").read_text())
+        return float(shell["size"][0 if what == "room-width" else 2])
+    slug = what.split("-")[0]
+    spec = json.loads((out / "things" / "stand-ins.json").read_text())
+    part = next(p for p in spec["parts"] if p["slug"] == slug)
+    boxes = [b for b in part["boxes"] if b.get("carries")] or part["boxes"]
+    return max(b["centre"][1] + b["size"][1] / 2 for b in boxes if "centre" in b)
+
+
+def set_scale(out, what, metres):
+    """The owner's tape measure: one real length sets the room's scale (it beats the wall plates), then everything
+    sized by it is made again."""
+    out = Path(out)
+    if what not in KNOWN:
+        raise SystemExit(f"what's measured must be one of: {', '.join(KNOWN)}")
+    low, high = SENSIBLE[what]
+    if not low <= metres <= high:
+        raise SystemExit(f"{metres:g} m isn't a believable {what.replace('-', ' ')} ({low:g} to {high:g} m). "
+                         f"In centimetres? Write it as {metres:g}cm.")
+    units = _known_length(out, what)
+    frame_file = out / "room-frame.json"
+    frame = json.loads(frame_file.read_text())
+    before = frame.get("scale")
+    frame["scale"] = round(metres / units, 4)
+    frame["scaleEvidence"] = {"source": "tape measure", "what": what, "metres": metres, "roomUnits": round(units, 4),
+                              "before": before, "plates": (frame.get("scaleEvidence") or {}).get("plates")}
+    frame_file.write_text(json.dumps(frame, indent=2))
+    rebuild(out)
+    _rescale_items(out, frame["scale"])
+    return {"scale": frame["scale"], "before": before, "what": what, "metres": metres, "roomUnits": round(units, 4)}
+
+
+def rebuild(out):
+    """Everything the scale sizes, made again: the shell (its assumed ceiling is 2.44 real metres), its wall photos and
+    clean materials, and the splats trimmed to it."""
+    import reconstruct
+    import room_materials
+    import room_textures
+
+    out = Path(out)
+    shell = reconstruct.write_room_shell(out)
+    room_textures.make_textures(out)
+    room_materials.make(out)
+    if (out / "room-splats-full.ply").exists() or (out / "room-splats.ply").exists():
+        reconstruct.trim_splats(out)
+    return {"shell": shell["size"], "ceilingAssumed": shell["ceilingAssumed"]}
+
+
+USAGE = """usage: python worker/room_scale.py <request folder>                     (the scale from the wall plates)
+       python worker/room_scale.py set <request folder> <what> <length>   (a tape measure: room-width, room-length,
+                                                                          desk-height or bed-height; 0.74 or 74cm)
+       python worker/room_scale.py rebuild <request folder>               (shell, wall photos, materials, splats)"""
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: python worker/room_scale.py <request folder>")
-    result = measure(sys.argv[1])
-    print(json.dumps({k: v for k, v in result.items() if k != "plates"}, indent=2))
-    for plate in result.get("plates", []):
-        print(plate)
+    if len(sys.argv) == 5 and sys.argv[1] == "set":
+        print(json.dumps(set_scale(sys.argv[2], sys.argv[3], _metres(sys.argv[4])), indent=2))
+    elif len(sys.argv) == 3 and sys.argv[1] == "rebuild":
+        print(json.dumps(rebuild(sys.argv[2]), indent=2))
+    elif len(sys.argv) == 2:
+        result = measure(sys.argv[1])
+        print(json.dumps({k: v for k, v in result.items() if k != "plates"}, indent=2))
+        for plate in result.get("plates", []):
+            print(plate)
+        print("then, when the scale changed: python worker/room_scale.py rebuild <request folder>")
+    else:
+        sys.exit(USAGE)

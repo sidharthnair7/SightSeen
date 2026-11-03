@@ -16,6 +16,11 @@ async function reason(response: Response): Promise<string> {
   return `Something went wrong (${response.status}).`
 }
 
+/** A static copy of one room for a free host (scripts/export_static.py): no server, so a room's details come from a
+ * file next to its other files, and nothing can be uploaded or rebuilt. */
+export const STATIC = import.meta.env.VITE_STATIC === '1'
+export const STATIC_ROOM: string | undefined = import.meta.env.VITE_STATIC_ROOM
+
 export const api = {
   create: (label: string) =>
     fetch('/api/requests', {
@@ -23,7 +28,8 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label }),
     }).then(r => read<RoomRequest>(r)),
-  request: (id: string) => fetch(`/api/requests/${id}`).then(r => read<RoomRequest>(r)),
+  request: (id: string) =>
+    fetch(STATIC ? `/api/requests/${id}/request.json` : `/api/requests/${id}`).then(r => read<RoomRequest>(r)),
   rerun: (id: string, model: string) =>
     fetch(`/api/requests/${id}/rerun?model=${encodeURIComponent(model)}`, { method: 'POST' }).then(r => read<RoomRequest>(r)),
   film: (token: string) => fetch(`/api/film/${token}`).then(r => read<FilmView>(r)),

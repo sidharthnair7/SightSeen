@@ -17,11 +17,12 @@ export default function Film({ token }: { token: string }) {
     api.film(token).then(setView).catch(e => setError((e as Error).message))
   }, [token])
 
-  async function send(file: File) {
+  // live: recorded in this page (the student's issues view says so), not a file picked from the phone
+  async function send(file: File, live = false) {
     setError(null)
     setProgress(0)
     try {
-      await uploadVideo(`/api/film/${token}/video`, file, setProgress)
+      await uploadVideo(`/api/film/${token}/video${live ? '?live=true' : ''}`, file, setProgress)
       setSent(true)
     } catch (e) {
       setError((e as Error).message)
@@ -60,7 +61,7 @@ export default function Film({ token }: { token: string }) {
           </div>
         ) : (
           <>
-            <Recorder sending={progress} onSend={send} />
+            <Recorder sending={progress} onSend={file => send(file, true)} />
             <div className="mt-6 border-t border-slate-200 pt-4">
               <p className="mb-2 text-sm text-slate-600">Already filmed it? Send that video instead.</p>
               <VideoPicker label="Choose a video" progress={progress} onPick={send} />

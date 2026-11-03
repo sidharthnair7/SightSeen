@@ -50,6 +50,20 @@ public class RequestFiles {
         return name;
     }
 
+    /** Notes whether the video was recorded in SightSeen's page (video-live.json), or removes the note. */
+    public void markRecordedLive(String requestId, boolean recordedLive) {
+        Path marker = folder(requestId).resolve("video-live.json");
+        try {
+            if (recordedLive) {
+                Files.writeString(marker, "{\"recordedInPage\": true, \"at\": \"" + java.time.Instant.now() + "\"}");
+            } else {
+                Files.deleteIfExists(marker);
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
     public Path roomFile(String requestId) {
         return folder(requestId).resolve("room.ply");
     }

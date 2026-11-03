@@ -570,7 +570,14 @@ def _build_locally(out, folder, frames, script="sam3d_local.py", marker="sam3d")
                 summary.append({"thing": thing["slug"], **result})
                 continue
             arrays = np.load(work / stem / f"{n}.npz")
-            _save_object(folder / thing["slug"], arrays["vertices"], arrays["faces"], arrays["colours"], result["layout"])
+            if "canonical" in arrays:
+                # SAM 3D's shape, fitted by place() like TRELLIS's (outline and measured points): its own layout made
+                # take 4's suitcase 25% too big (outline fit 0.57, against 0.84 fitted)
+                _save_object(folder / thing["slug"], arrays["canonical"], arrays["faces"], arrays["colours"],
+                             {"canonical": "z-up"})
+            else:
+                _save_object(folder / thing["slug"], arrays["vertices"], arrays["faces"], arrays["colours"],
+                             result["layout"])
             summary.append({"thing": thing["slug"], "vertices": result["vertices"], "seconds": result["seconds"],
                             "peakGb": result["peakGb"]})
         if all("error" not in item for item in summary):
@@ -1150,9 +1157,11 @@ def _fit_into_box(vertices, triangles, camera, outline, box, level, lift, real_d
     return best[1], best[0], best[2]
 
 
-def place(out):
+def place(out, only=None):
     """Steps 3 and 4: every built thing in the room at its measured spot and size, its seen sides painted from the
-    photo. Writes room-thing-<slug>.ply and room-things.json."""
+    photo. Writes room-thing-<slug>.ply and room-things.json. `only`: slugs to place again (rebuilt by another model,
+    say); the rest stay as the loop left them: they're merged into things/placed-things.json, the placement the
+    stand-ins step starts from (worker/stand_ins.py, run it next), or into room-things.json when there's none."""
     import cv2
     import open3d as o3d
 
@@ -1165,6 +1174,8 @@ def place(out):
     placed, failed, merged = [], [], []
     has_bed = any(_head(t["name"]) == "bed" for t in things)
     for thing in things:
+        if only and thing["slug"] not in only:
+            continue
         own = folder / thing["slug"]
         if has_bed and BEDDING.search(_head(thing["name"])):
             continue  # part of the bed (its photo shows it, and its points are in the bed's box)
@@ -1224,6 +1235,21 @@ def place(out):
             "outlineFit": round(coverage, 3), "fit": choice, "scaledBy": round(ratio, 4),
             "measuredGapCm": None if math.isnan(gap) else round(100 * gap, 1),
         })
+    if only:
+        aside = folder / "placed-things.json"
+        base_file = aside if aside.exists() else out / "room-things.json"
+        base = json.loads(base_file.read_text())
+        base["things"] = [t for t in base["things"] if t["slug"] not in only] + placed
+        base["failed"] = [t for t in base.get("failed", []) if t["slug"] not in only] + failed
+        base_file.write_text(json.dumps(base, indent=2))
+        if base_file == aside:
+            return {"placed": [t["slug"] for t in placed], "failed": failed, "mergedInto": str(aside),
+                    "next": "python worker/stand_ins.py <request folder>"}
+        placed, failed, merged = base["things"], base["failed"], []
+        for thing in placed:
+            mesh = o3d.io.read_triangle_mesh(str(out / thing["file"]))
+            merged.append((np.asarray(mesh.vertices), (np.asarray(mesh.vertex_colors) * 255 + 0.5).astype(np.uint8),
+                           np.asarray(mesh.triangles)))
     summary = {"things": placed, "failed": failed}
     (out / "room-things.json").write_text(json.dumps(summary, indent=2))
     # All of them in one mesh, so the room checks can draw the Rebuilt look (room_checks.WalkRoom's `furniture`)
@@ -1239,7 +1265,7 @@ if __name__ == "__main__":
     steps = {"pick": pick, "complete": complete, "measure-big": measure_big, "build": build, "place": place}
     if len(sys.argv) < 3 or sys.argv[1] not in steps:
         sys.exit("usage: python worker/rebuild_things.py pick|complete|build|place <request folder> "
-                 "[build: thing slugs] [--runner local|trellis|modal|fal]")
+                 "[build, place: thing slugs] [--runner local|trellis|modal|fal]")
     if sys.argv[1] == "build":
         extra = sys.argv[3:]
         runner = "local"
@@ -1248,5 +1274,7 @@ if __name__ == "__main__":
             runner = extra[at + 1]
             extra = extra[:at] + extra[at + 2:]
         print(json.dumps(build(sys.argv[2], set(extra) or None, runner), indent=2))
+    elif sys.argv[1] == "place":
+        print(json.dumps(place(sys.argv[2], set(sys.argv[3:]) or None), indent=2))
     else:
         print(json.dumps(steps[sys.argv[1]](sys.argv[2]), indent=2))

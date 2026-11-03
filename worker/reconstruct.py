@@ -91,8 +91,9 @@ MIN_EYE, MAX_EYE = 0.9, 2.0  # metres: a phone held for filming sits in here, so
 LEVEL_SPREAD = 0.10  # metres: flat patches this close to the lowest (or highest) one are the same floor (or ceiling)
 WALL_DEGREES = 20  # surface facing within this of a wall direction counts towards that wall
 WALL_SHARE = 0.25  # a 2 cm slice needs this share of the busiest slice's surface to be a wall, not a stray bit
-# metres (8 ft, the usual ceiling here): when the video never saw the ceiling, the shell is at least this tall, and
-# room-shell.json says the height was assumed (take 4 filmed nothing above 1.83 m, which made a room too low to stand in)
+# real metres (8 ft, the usual ceiling here): when the video never saw the ceiling, the shell is at least this tall,
+# in the room's own units by room-frame.json's "scale" when it has one, and room-shell.json says the height was assumed
+# (take 4 filmed nothing above 1.83 m, which made a room too low to stand in)
 ASSUMED_CEILING = 2.44
 SHELL_TRIM = 0.06  # metres: splats this close to a wall or the ceiling go, and the clean shell shows there instead
 FLOOR_TRIM = 0.03  # metres: the same for the floor, kept tighter so things standing on it keep their feet
@@ -140,6 +141,13 @@ def _model(key):
         model.eval()
         _loaded.update(key=key, model=model)
     return _loaded["model"]
+
+
+def unload():
+    """Frees the card for another model (an item build runs TRELLIS in WSL on the same 8 GB)."""
+    _loaded.update(key=None, model=None)
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
 
 
 def sharpness(frame):
@@ -703,7 +711,7 @@ def _flat_planes(points, up, rounds=12, min_points=200):
     return sorted(planes, key=lambda plane: plane[0])
 
 
-def write_room_frame(out):
+def write_room_frame(out, keep_scale=False):
     """room-frame.json: which way is up and where the floor is, so the viewer can stand the room upright with the floor
     at height 0 (the room's space is the first frame's camera, which was tilted). Walking on the website and standing
     in VR both need it. Up comes from the cameras: a phone's sideways axis stays level while it's carried, so up is the
@@ -756,6 +764,12 @@ def write_room_frame(out):
         "floorTiltDegrees": round(math.degrees(math.acos(min(1.0, float(floor[1] @ up)))), 2) if floor else None,
         "trusted": floor is not None and MIN_EYE <= eye <= MAX_EYE,
     }
+    # Run again on the same rebuild (`reconstruct.py frame`), the room's units haven't changed, so its real scale
+    # (worker/room_scale.py) still holds; a new rebuild's units are new, and its scale has to be found again
+    old_file = out / "room-frame.json"
+    if keep_scale and old_file.exists():
+        old = json.loads(old_file.read_text())
+        frame.update({key: old[key] for key in ("scale", "scaleEvidence", "plateCheck") if old.get(key) is not None})
     (out / "room-frame.json").write_text(json.dumps(frame, indent=2))
     return frame
 
@@ -794,7 +808,8 @@ def write_room_shell(out):
     turn = np.arctan2(normals[sideways, 2], normals[sideways, 0])
     yaw = float(np.angle(np.exp(4j * turn).mean()) / 4)  # the walls' direction, on a 90-degree turn
     axes = [np.array([math.cos(yaw), 0.0, math.sin(yaw)]), np.array([-math.sin(yaw), 0.0, math.cos(yaw)])]
-    height = frame["ceilingHeight"] or max(float(np.percentile(points[:, 1], 99)), ASSUMED_CEILING)
+    assumed = ASSUMED_CEILING / (frame.get("scale") or 1.0)  # real metres -> the room's units
+    height = frame["ceilingHeight"] or max(float(np.percentile(points[:, 1], 99)), assumed)
 
     walls, faces = [], {}
     for axis, names in zip(axes, (("left", "right"), ("front", "back"))):
@@ -1067,7 +1082,7 @@ if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "cameras":
         print(write_cameras(sys.argv[2]), "camera spots written")
     elif len(sys.argv) == 3 and sys.argv[1] == "frame":
-        print(json.dumps(write_room_frame(sys.argv[2]), indent=2))
+        print(json.dumps(write_room_frame(sys.argv[2], keep_scale=True), indent=2))
     elif len(sys.argv) == 3 and sys.argv[1] == "shell":
         print(json.dumps(write_room_shell(sys.argv[2]), indent=2))
     elif len(sys.argv) == 3 and sys.argv[1] == "trim":

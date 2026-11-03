@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js'
-import { makeMovable, type Movable, type Piece } from './moveThings'
+import { makeMovable, type Fit, type Movable, type Piece } from './moveThings'
 import type { RoomShell } from './types'
 
 /** room-things.json (worker/rebuild_things.py): the room's things rebuilt whole by SAM 3D, in the upright room. */
@@ -16,6 +16,20 @@ type RebuiltThings = {
     fixed?: boolean
   }[]
   failed: { name: string; box?: { centre: number[]; size: number[]; yawDegrees: number } | null }[]
+}
+
+/** A model's PLY: in a headset's browser (`light`) its lighter copy, vr-<file>, when there is one (a Quest draws about
+ * a million triangles a frame, and the hosted copy has these), else the full one. A static host answers a missing
+ * file with its page, so an HTML answer counts as missing. */
+export async function fetchModel(folder: string, file: string, light = false): Promise<Response | null> {
+  const ok = (response: Response | null) =>
+    !!response?.ok && !(response.headers.get('content-type') ?? '').includes('text/html')
+  if (light) {
+    const lighter = await fetch(`${folder}vr-${file}`).catch(() => null)
+    if (ok(lighter)) return lighter
+  }
+  const full = await fetch(`${folder}${file}`).catch(() => null)
+  return ok(full) ? full : null
 }
 
 // What the video never saw, when it's shown: tinted towards this colour, half and half
@@ -40,7 +54,9 @@ export async function loadRebuilt(
   camera: THREE.Camera,
   dom: HTMLElement,
   shell: RoomShell | null,
-  changed: (name: string | null) => void,
+  changed: (name: string | null, fit?: Fit | null) => void,
+  scale: () => number = () => 1,
+  light = false,
 ): Promise<Rebuilt | null> {
   let found: RebuiltThings
   try {
@@ -54,12 +70,13 @@ export async function loadRebuilt(
 
   const group = new THREE.Group()
   const pieces: Piece[] = []
+  const fixed: Piece[] = [] // drawn and in the way, not movable
   const geometries: THREE.BufferGeometry[] = []
   const loader = new PLYLoader()
   loader.setCustomPropertyNameMapping({ seen: ['seen'] }) // 1 where the colour is the photo's, 0 where it's SAM 3D's
   await Promise.all(found.things.map(async thing => {
-    const response = await fetch(`${assets}${thing.file}`)
-    if (!response.ok) return
+    const response = await fetchModel(assets, thing.file, light)
+    if (!response) return
     const geometry = loader.parse(await response.arrayBuffer())
     geometry.computeVertexNormals()
     geometries.push(geometry)
@@ -67,7 +84,7 @@ export async function loadRebuilt(
     const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
     mesh.name = thing.name
     group.add(mesh)
-    if (!thing.fixed) pieces.push({ ...thing, object: mesh })
+    ;(thing.fixed ? fixed : pieces).push({ ...thing, object: mesh })
   }))
   for (const thing of found.failed ?? []) {
     if (!thing.box) continue
@@ -82,7 +99,7 @@ export async function loadRebuilt(
     block.name = `${thing.name} (not built)`
     group.add(block)
     // The box itself is what moves, so it moves from its own spot
-    pieces.push({ name: block.name, object: block, centre, size, yawDegrees })
+    pieces.push({ name: block.name, object: block, centre, size, yawDegrees, placeholder: true })
   }
 
   // The photo's colours and the tinted ones, swapped by showNotFilmed
@@ -107,7 +124,7 @@ export async function loadRebuilt(
     }
   }
 
-  const movable = makeMovable(pieces, scene, camera, dom, shell, changed)
+  const movable = makeMovable(pieces, scene, camera, dom, shell, changed, undefined, { fixed, scale })
   return {
     group,
     count: found.things.length,

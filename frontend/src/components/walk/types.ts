@@ -6,6 +6,8 @@ export type RoomShell = {
   size: number[]
   yawDegrees: number
   faces: Record<ShellFace, number[]>
+  /** The video never showed the ceiling: its height is a standard one (2.44 real metres), not measured */
+  ceilingAssumed?: boolean
 }
 
 /** The shell's faces, in BoxGeometry's material order: +x, -x, +y, -y, +z, -z. */

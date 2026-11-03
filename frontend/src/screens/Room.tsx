@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Loader2, RotateCcw } from 'lucide-react'
-import { api, uploadVideo } from '../api'
+import { STATIC, api, uploadVideo } from '../api'
 import CopyLink from '../components/CopyLink'
 import RoomViewer from '../components/RoomViewer'
 import VideoPicker from '../components/VideoPicker'
@@ -130,14 +130,12 @@ export default function Room({ id }: { id: string }) {
                 {' '}{room.points.toLocaleString()} points.
               </p>
               <p className="mt-2">
-                Rough extent: {room.sizeX.toFixed(2)} × {room.sizeY.toFixed(2)} × {room.sizeZ.toFixed(2)} m, along the
-                first frame's directions, not the walls. Measure a wall with two clicks instead.
-              </p>
-              <p className="mt-2 text-slate-500">
-                Sizes come from MapAnything's own scale and haven't been checked against anything in the room yet.
+                Measurements in the 3D view are in metres, and the view says how sure they are: MapAnything's own scale
+                is typically off by about 15%, wall plates in the video (a standard size) can check it, and one length
+                measured with a tape settles it. Click two points to measure anything.
               </p>
             </div>
-            <div className="rounded-xl bg-white p-5 text-sm text-slate-700 shadow-sm">
+            {!STATIC && <div className="rounded-xl bg-white p-5 text-sm text-slate-700 shadow-sm">
               <p className="font-medium text-slate-900">Compare</p>
               <p className="mt-2">Build the same video again with the other MapAnything model and measure the same wall.</p>
               <button
@@ -147,12 +145,12 @@ export default function Room({ id }: { id: string }) {
               >
                 Build again with the {MODELS[otherModel]} model
               </button>
-            </div>
+            </div>}
           </div>
         </section>
       )}
 
-      {!building && (
+      {!building && !STATIC && (
         <section className="mt-8 max-w-xl">
           <p className="text-sm text-slate-600">
             {request.status === 'WAITING_FOR_VIDEO'

@@ -29,3 +29,6 @@ CHECKLIST.md
 
 # The phone-testing HTTPS certificate (a private key: never commit it)
 frontend/certs/
+
+# The static copy of a room for hosting (worker/export_static.py): room data, never committed
+site/

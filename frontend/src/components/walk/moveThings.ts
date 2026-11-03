@@ -17,6 +17,8 @@ export type Piece = {
   yawDegrees: number
   /** A move across the upright room in the object's own parent's frame (the splats sit in the turned room group). */
   toLocal?: (move: THREE.Vector3) => THREE.Vector3
+  /** A grey box standing in for a thing SAM 3D couldn't build: its size is a guess, so it's never in the way */
+  placeholder?: boolean
 }
 
 export type Movable = {
@@ -26,12 +28,30 @@ export type Movable = {
   reset: () => void
   /** True when a pointer-down started dragging a thing (the viewer then skips its own turning and measuring). */
   grab: (event: PointerEvent) => boolean
+  /** One more thing to pick up (one of the student's own, built after the room loaded). */
+  add: (piece: Piece) => void
+  /** Turns the thing last picked up about its own middle, in degrees (things moved within the turned room group, the
+   * splats, don't turn). */
+  turn: (degrees: number) => void
+  /** Where a new thing of this size and turn can stand: the free floor nearest the room's middle, clear of every
+   * thing standing on the floor and inside the walls (its middle, in the room), or null when nowhere is free. */
+  freeSpot: (size: number[], yawDegrees: number) => number[] | null
   dispose: () => void
 }
 
+/** How a held thing sits among the others, in real metres: to the nearest wall, to the nearest thing standing on the
+ * floor, or how far it runs into one (footprints on the floor, in the walls' directions). */
+export type Fit = { wall: number; nearest: { name: string; gap: number } | null; into: { name: string; depth: number } | null }
+
+const FLOOR_REACH = 0.15 // metres: a thing whose bottom is this close to the floor stands on it
+const CLUTTER = 0.1 // metres: anything lower is clutter, not in the way
+const SPOT_STEP = 0.05 // room units between the spots tried for a new thing
+const SPOT_MARGIN = 0.03 // room units kept clear round a new thing
+
 /**
  * Picking up things and moving them across the floor: an invisible box round each thing is what the pointer grabs,
- * and the thing moves with it. Things stay inside the walls.
+ * and the thing moves with it. Things stay inside the walls, and `changed` hears how the held one fits. `fixed` things
+ * (the window, the door, the heater) can't be picked up but still take up room.
  */
 export function makeMovable(
   pieces: Piece[],
@@ -39,25 +59,85 @@ export function makeMovable(
   camera: THREE.Camera,
   dom: HTMLElement,
   shell: RoomShell | null,
-  changed: (name: string | null) => void,
+  changed: (name: string | null, fit?: Fit | null) => void,
   refresh: () => void = () => {},
+  options: { fixed?: Piece[]; scale?: () => number } = {},
 ): Movable {
   const boxes = new THREE.Group()
-  scene.add(boxes)
-  const held = new Map<THREE.Object3D, { piece: Piece; home: THREE.Vector3; boxHome: THREE.Vector3 }>()
-  for (const piece of pieces) {
+  const fixed = new THREE.Group() // in the way, not movable
+  scene.add(boxes, fixed)
+  type Hold = { piece: Piece; home: THREE.Vector3; boxHome: THREE.Vector3; turnHome: number; boxTurnHome: number }
+  const held = new Map<THREE.Object3D, Hold>()
+  const boxFor = (piece: Piece) => {
     const box = new THREE.Mesh(new THREE.BoxGeometry(piece.size[0], piece.size[1], piece.size[2]),
       new THREE.MeshBasicMaterial({ visible: false }))
     box.position.set(piece.centre[0], piece.centre[1], piece.centre[2])
     box.rotation.y = -THREE.MathUtils.degToRad(piece.yawDegrees)
     box.name = piece.name
+    box.userData.placeholder = piece.placeholder === true
+    return box
+  }
+  const addPiece = (piece: Piece) => {
+    const box = boxFor(piece)
     const outline = new THREE.LineSegments(new THREE.EdgesGeometry(box.geometry), new THREE.LineBasicMaterial({ color: '#f59e0b' }))
     outline.visible = false
     box.add(outline)
     boxes.add(box)
-    held.set(box, { piece, home: piece.object.position.clone(), boxHome: box.position.clone() })
+    held.set(box, { piece, home: piece.object.position.clone(), boxHome: box.position.clone(),
+      turnHome: piece.object.rotation.y, boxTurnHome: box.rotation.y })
   }
+  pieces.forEach(addPiece)
+  options.fixed?.forEach(piece => fixed.add(boxFor(piece)))
   boxes.visible = false
+  fixed.visible = false
+  const scale = options.scale ?? (() => 1)
+
+  // The walls' own directions: across (the shell's x) and along (its z), from its middle
+  const wallYaw = shell ? THREE.MathUtils.degToRad(shell.yawDegrees) : 0
+  const across = new THREE.Vector3(Math.cos(wallYaw), 0, Math.sin(wallYaw))
+  const along = new THREE.Vector3(-Math.sin(wallYaw), 0, Math.cos(wallYaw))
+  const middle = shell ? new THREE.Vector3(...shell.centre).setY(0) : new THREE.Vector3()
+  /** Half a footprint's size in the walls' directions, for a thing `width` by `depth` turned `rotationY`. */
+  const halves = (width: number, depth: number, rotationY: number) => {
+    const turn = rotationY + wallYaw // its turn against the walls
+    const [c, s] = [Math.abs(Math.cos(turn)), Math.abs(Math.sin(turn))]
+    return { hx: (c * width + s * depth) / 2, hz: (s * width + c * depth) / 2 }
+  }
+  /** A box's footprint in the walls' directions, at `position`: its middle (x across, z along) and half-sizes. */
+  const footprint = (box: THREE.Mesh, position = box.position) => {
+    const { width, depth } = (box.geometry as THREE.BoxGeometry).parameters
+    const offset = position.clone().sub(middle)
+    return { x: offset.dot(across), z: offset.dot(along), ...halves(width, depth, box.rotation.y) }
+  }
+  // In the way: standing on the floor, and taller than clutter you'd pick up (a sock, a bottle on its side)
+  const standing = (box: THREE.Mesh) => {
+    const { height } = (box.geometry as THREE.BoxGeometry).parameters
+    return box.position.y - height / 2 < FLOOR_REACH / scale() && height >= CLUTTER / scale()
+  }
+  const others = (box: THREE.Mesh | null) => [...boxes.children, ...fixed.children]
+    .filter(other => other !== box && !other.userData.placeholder && standing(other as THREE.Mesh)) as THREE.Mesh[]
+
+  const fitOf = (box: THREE.Mesh): Fit | null => {
+    if (!shell) return null
+    const metres = scale()
+    const f = footprint(box)
+    const wall = Math.min(shell.size[0] / 2 - f.hx - Math.abs(f.x), shell.size[2] / 2 - f.hz - Math.abs(f.z))
+    let nearest: Fit['nearest'] = null
+    let into: Fit['into'] = null
+    for (const other of others(box)) {
+      const g = footprint(other)
+      const gapX = Math.abs(f.x - g.x) - (f.hx + g.hx)
+      const gapZ = Math.abs(f.z - g.z) - (f.hz + g.hz)
+      if (gapX < 0 && gapZ < 0) {
+        const depth = Math.min(-gapX, -gapZ) * metres
+        if (!into || depth > into.depth) into = { name: other.name, depth }
+      } else {
+        const gap = Math.hypot(Math.max(gapX, 0), Math.max(gapZ, 0)) * metres
+        if (!nearest || gap < nearest.gap) nearest = { name: other.name, gap }
+      }
+    }
+    return { wall: Math.max(0, wall) * metres, nearest, into }
+  }
 
   const raycaster = new THREE.Raycaster()
   const floor = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
@@ -77,32 +157,32 @@ export function makeMovable(
     return raycaster.ray.intersectPlane(floor, new THREE.Vector3())
   }
 
-  // Keeps a moved thing's box inside the walls, in the walls' own directions
+  // Keeps a moved thing's box inside the walls, in the walls' own directions, as it's turned now
   const inside = (box: THREE.Mesh, move: THREE.Vector3) => {
     if (!shell) return move
-    const yaw = THREE.MathUtils.degToRad(shell.yawDegrees)
-    const across = new THREE.Vector3(Math.cos(yaw), 0, Math.sin(yaw))
-    const along = new THREE.Vector3(-Math.sin(yaw), 0, Math.cos(yaw))
-    const size = (box.geometry as THREE.BoxGeometry).parameters
-    const next = box.position.clone().add(move).sub(new THREE.Vector3(...shell.centre))
-    const limitX = Math.max(0, shell.size[0] / 2 - size.width / 2)
-    const limitZ = Math.max(0, shell.size[2] / 2 - size.depth / 2)
-    const x = THREE.MathUtils.clamp(next.dot(across), -limitX, limitX)
-    const z = THREE.MathUtils.clamp(next.dot(along), -limitZ, limitZ)
-    const clamped = across.clone().multiplyScalar(x).add(along.clone().multiplyScalar(z))
-    clamped.y = next.y
-    return clamped.add(new THREE.Vector3(...shell.centre)).sub(box.position)
+    const f = footprint(box, box.position.clone().add(move))
+    const limitX = Math.max(0, shell.size[0] / 2 - f.hx)
+    const limitZ = Math.max(0, shell.size[2] / 2 - f.hz)
+    const x = THREE.MathUtils.clamp(f.x, -limitX, limitX)
+    const z = THREE.MathUtils.clamp(f.z, -limitZ, limitZ)
+    const clamped = middle.clone().addScaledVector(across, x).addScaledVector(along, z)
+    clamped.y = box.position.y
+    return clamped.sub(box.position)
+  }
+  // Moves a box and its thing together
+  const shift = (box: THREE.Mesh, move: THREE.Vector3) => {
+    box.position.add(move)
+    const { piece } = held.get(box)!
+    piece.object.position.add(piece.toLocal ? piece.toLocal(move.clone()) : move)
   }
 
   const onMove = (event: PointerEvent) => {
     if (!holding) return
     const point = onFloor(event)
     if (!point) return
-    const move = inside(holding, point.clone().sub(last).setY(0))
+    shift(holding, inside(holding, point.clone().sub(last).setY(0)))
     last.copy(point)
-    holding.position.add(move)
-    const { piece } = held.get(holding)!
-    piece.object.position.add(piece.toLocal ? piece.toLocal(move.clone()) : move)
+    changed(holding.name, fitOf(holding))
     refresh()
   }
   const onUp = () => {
@@ -112,9 +192,11 @@ export function makeMovable(
     window.removeEventListener('pointerup', onUp)
   }
 
+  let selected: THREE.Mesh | null = null
   const select = (box: THREE.Mesh | null) => {
+    selected = box
     boxes.children.forEach(child => ((child.children[0] as THREE.LineSegments).visible = child === box))
-    changed(box ? box.name : null)
+    changed(box ? box.name : null, box ? fitOf(box) : null)
   }
 
   return {
@@ -124,11 +206,48 @@ export function makeMovable(
       if (!value) select(null)
     },
     reset: () => {
-      for (const [box, { piece, home, boxHome }] of held) {
+      for (const [box, { piece, home, boxHome, turnHome, boxTurnHome }] of held) {
         box.position.copy(boxHome)
+        box.rotation.y = boxTurnHome
         piece.object.position.copy(home)
+        piece.object.rotation.y = turnHome
       }
       refresh()
+    },
+    add: addPiece,
+    turn: degrees => {
+      const hold = selected && held.get(selected)
+      if (!selected || !hold || hold.piece.toLocal) return
+      // about the box's middle: the box turns in place, and the thing turns round the same spot
+      const angle = THREE.MathUtils.degToRad(degrees)
+      const object = hold.piece.object
+      const pivot = selected.position.clone().setY(0)
+      const offset = object.position.clone().setY(0).sub(pivot).applyAxisAngle(new THREE.Vector3(0, 1, 0), angle)
+      object.position.set(pivot.x + offset.x, object.position.y, pivot.z + offset.z)
+      object.rotation.y += angle
+      selected.rotation.y += angle
+      shift(selected, inside(selected, new THREE.Vector3())) // turned, it may reach a wall: back inside
+      changed(selected.name, fitOf(selected))
+      refresh()
+    },
+    freeSpot: (size, yawDegrees) => {
+      if (!shell) return null
+      const f = halves(size[0], size[2], -THREE.MathUtils.degToRad(yawDegrees))
+      const blocks = others(null).map(other => footprint(other))
+      const limitX = shell.size[0] / 2 - f.hx - SPOT_MARGIN
+      const limitZ = shell.size[2] / 2 - f.hz - SPOT_MARGIN
+      let best: { x: number; z: number; far: number } | null = null
+      for (let x = -limitX; x <= limitX; x += SPOT_STEP) {
+        for (let z = -limitZ; z <= limitZ; z += SPOT_STEP) {
+          const far = Math.hypot(x, z)
+          if (best && far >= best.far) continue
+          const clear = blocks.every(g => Math.abs(x - g.x) >= f.hx + g.hx + SPOT_MARGIN || Math.abs(z - g.z) >= f.hz + g.hz + SPOT_MARGIN)
+          if (clear) best = { x, z, far }
+        }
+      }
+      if (!best) return null
+      const spot = middle.clone().addScaledVector(across, best.x).addScaledVector(along, best.z)
+      return [spot.x, size[1] / 2, spot.z]
     },
     grab: event => {
       if (!on) return false
@@ -148,13 +267,15 @@ export function makeMovable(
     },
     dispose: () => {
       onUp()
-      boxes.traverse(child => {
-        if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
-          child.geometry.dispose()
-          ;(child.material as THREE.Material).dispose()
-        }
-      })
-      scene.remove(boxes)
+      for (const group of [boxes, fixed]) {
+        group.traverse(child => {
+          if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
+            child.geometry.dispose()
+            ;(child.material as THREE.Material).dispose()
+          }
+        })
+      }
+      scene.remove(boxes, fixed)
     },
   }
 }
@@ -170,8 +291,9 @@ export async function movableThings(
   camera: THREE.Camera,
   dom: HTMLElement,
   shell: RoomShell | null,
-  changed: (name: string | null) => void,
+  changed: (name: string | null, fit?: Fit | null) => void,
   refresh: () => void,
+  scale: () => number = () => 1,
 ): Promise<(Movable & { parts: THREE.Group }) | null> {
   let found: SplatParts
   try {
@@ -193,7 +315,7 @@ export async function movableThings(
     parts.add(splats)
     if ('centre' in part) pieces.push({ ...part, object: splats, toLocal })
   }
-  const movable = makeMovable(pieces, scene, camera, dom, shell, changed, refresh)
+  const movable = makeMovable(pieces, scene, camera, dom, shell, changed, refresh, { scale })
   return {
     ...movable,
     parts,

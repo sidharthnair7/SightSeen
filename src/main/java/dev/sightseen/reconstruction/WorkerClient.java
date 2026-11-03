@@ -22,6 +22,10 @@ public class WorkerClient {
                              int maxFrames) {
     }
 
+    /** One of the student's things to build from its photo (worker/items.py): items/{itemId}/ in the room's folder. */
+    public record ItemJob(String itemId, String requestDir) {
+    }
+
     /** The helper's answer about a job: state is queued, running, done or failed. */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record JobStatus(String jobId, String state, String stage, String message, RoomStats result) {
@@ -45,6 +49,15 @@ public class WorkerClient {
                 .body(job)
                 .retrieve()
                 .body(JobStatus.class);
+    }
+
+    /** Queues a thing's build; its progress is in its own item.json, which the helper writes. */
+    public void submitItem(ItemJob job) {
+        http.post().uri("/items")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(job)
+                .retrieve()
+                .toBodilessEntity();
     }
 
     /** Empty when the helper doesn't know the job, which happens after it restarts. */

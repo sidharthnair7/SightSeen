@@ -44,6 +44,14 @@ public class RequestService {
 
     /** Saves the video and hands it straight to the 3D helper. */
     public RoomRequest receiveVideo(RoomRequest r, MultipartFile video, VideoSource source) {
+        return receiveVideo(r, video, source, false);
+    }
+
+    /**
+     * {@code recordedLive}: filmed in SightSeen's own page (the landlord link's recorder), not a file picked from a
+     * phone. The issues mode's badge says which, from video-live.json beside the video.
+     */
+    public RoomRequest receiveVideo(RoomRequest r, MultipartFile video, VideoSource source, boolean recordedLive) {
         if (video == null || video.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "The video didn't arrive. Try sending it again.");
         }
@@ -55,6 +63,7 @@ public class RequestService {
         } catch (IOException e) {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Couldn't save the video.", e);
         }
+        files.markRecordedLive(r.getId(), recordedLive);
         requests.save(r);
         reconstruction.start(r, null);
         return r;

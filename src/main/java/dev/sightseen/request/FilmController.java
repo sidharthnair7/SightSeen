@@ -35,7 +35,8 @@ class FilmController {
     }
 
     @PostMapping(path = "/{token}/video", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    FilmView upload(@PathVariable String token, @RequestParam("video") MultipartFile video) {
-        return FilmView.of(service.receiveVideo(service.byLandlordToken(token), video, VideoSource.LANDLORD_LINK));
+    FilmView upload(@PathVariable String token, @RequestParam("video") MultipartFile video,
+                    @RequestParam(name = "live", defaultValue = "false") boolean live) {
+        return FilmView.of(service.receiveVideo(service.byLandlordToken(token), video, VideoSource.LANDLORD_LINK, live));
     }
 }
