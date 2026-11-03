@@ -174,17 +174,23 @@ curtains = [
 back = face_frame("back")
 inward_back = back[2].round(5).tolist()
 door_colour = median_colour((14, 15), "door")
-# The door: only filmed close up (frames 13-15) around its knob (0.965 m up, column 1.85) and the light switch just
-# past its casing (column 2.0, 0.92 m up). The knob is on the latch side, so the door runs from it away from the
-# switch: a standard door, 0.70 x 1.80 m in the room's units, its latch edge 6 cm past the knob (rule 1)
+# The door: only filmed close up (frames 13-15) around its knob (column 1.85) and the light switch just past its
+# casing (column 2.0). The knob is on the latch side, so the door runs from it away from the switch. Too little of it
+# was filmed to measure, and frames 13-15 sit on MapAnything's own cameras (off by up to 0.7 m: they put the knob above
+# the switch), so it's a standard door in real metres at the room's scale (rule 1): 0.81 x 2.03 m, the knob 0.91 m up,
+# its latch edge 6 cm past the knob's column
+SCALE = json.loads((out / "room-frame.json").read_text()).get("scale") or 1.0
+DOOR_W, DOOR_H, KNOB = 0.81 / SCALE, 2.03 / SCALE, 0.91 / SCALE
+LATCH = 1.91
 door = [
     # unseen parts a light door white: the frames saw it in the hall light's shadow (median door_colour)
-    face_box(back, 1.21, 1.91, 0.0, 1.80, -0.0175, 0.0175, [206, 204, 198], paint=True, paintFacing=inward_back),
-    face_box(back, 1.145, 1.21, 0.0, 1.865, 0.0, 0.02, WHITE),  # casing
-    face_box(back, 1.91, 1.965, 0.0, 1.865, 0.0, 0.02, WHITE),
-    face_box(back, 1.145, 1.965, 1.80, 1.865, 0.0, 0.02, WHITE),
-    face_box(back, 1.835, 1.865, 0.95, 0.98, 0.0175, 0.04, [150, 150, 154]),  # knob: its neck
-    face_box(back, 1.825, 1.875, 0.94, 0.99, 0.04, 0.065, [172, 172, 176]),  # and its round end, squared
+    face_box(back, LATCH - DOOR_W, LATCH, 0.0, DOOR_H, -0.0175, 0.0175, [206, 204, 198], paint=True,
+             paintFacing=inward_back),
+    face_box(back, LATCH - DOOR_W - 0.065, LATCH - DOOR_W, 0.0, DOOR_H + 0.065, 0.0, 0.02, WHITE),  # casing
+    face_box(back, LATCH, LATCH + 0.055, 0.0, DOOR_H + 0.065, 0.0, 0.02, WHITE),
+    face_box(back, LATCH - DOOR_W - 0.065, LATCH + 0.055, DOOR_H, DOOR_H + 0.065, 0.0, 0.02, WHITE),
+    face_box(back, 1.835, 1.865, KNOB - 0.015, KNOB + 0.015, 0.0175, 0.04, [150, 150, 154]),  # knob: its neck
+    face_box(back, 1.825, 1.875, KNOB - 0.025, KNOB + 0.025, 0.04, 0.065, [172, 172, 176]),  # and its round end
 ]
 switch = [
     face_box(back, 1.969, 2.031, 0.87, 0.97, 0.0, 0.006, [226, 216, 190]),  # a standard single plate, in the room's units

@@ -95,6 +95,7 @@ WALL_SHARE = 0.25  # a 2 cm slice needs this share of the busiest slice's surfac
 # in the room's own units by room-frame.json's "scale" when it has one, and room-shell.json says the height was assumed
 # (take 4 filmed nothing above 1.83 m, which made a room too low to stand in)
 ASSUMED_CEILING = 2.44
+CEILING_CLEARANCE = 0.05  # real metres an assumed ceiling keeps above the tallest thing the video filmed
 SHELL_TRIM = 0.06  # metres: splats this close to a wall or the ceiling go, and the clean shell shows there instead
 FLOOR_TRIM = 0.03  # metres: the same for the floor, kept tighter so things standing on it keep their feet
 BLOB = 0.30  # metres: splats wider than this are smears up close, not detail
@@ -809,7 +810,13 @@ def write_room_shell(out):
     yaw = float(np.angle(np.exp(4j * turn).mean()) / 4)  # the walls' direction, on a 90-degree turn
     axes = [np.array([math.cos(yaw), 0.0, math.sin(yaw)]), np.array([-math.sin(yaw), 0.0, math.cos(yaw)])]
     assumed = ASSUMED_CEILING / (frame.get("scale") or 1.0)  # real metres -> the room's units
-    height = frame["ceilingHeight"] or max(float(np.percentile(points[:, 1], 99)), assumed)
+    # An unfilmed ceiling is never below what the video did film: the room's rebuilt things, when it has them (a real
+    # scale can show a room's ceiling is higher than the usual 2.44 m: take 4's curtain rod is 2.60 m up)
+    things_file = out / "room-things.json"
+    tallest = max((t["centre"][1] + abs(t["size"][1]) / 2 for t in json.loads(things_file.read_text())["things"]),
+                  default=0.0) if things_file.exists() else 0.0
+    clear = tallest + CEILING_CLEARANCE / (frame.get("scale") or 1.0) if tallest else 0.0
+    height = frame["ceilingHeight"] or max(float(np.percentile(points[:, 1], 99)), assumed, clear)
 
     walls, faces = [], {}
     for axis, names in zip(axes, (("left", "right"), ("front", "back"))):
