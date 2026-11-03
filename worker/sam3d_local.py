@@ -140,6 +140,13 @@ def _run(pipeline, photo, outline, pointmap, seed):
     """One thing: SAM 3D's object moved by its own layout into the photo's camera, in OpenCV's axes."""
     from sam3d_objects.utils.visualization import SceneVisualizer
 
+    if outline.shape != photo.shape[:2]:  # an outline a pixel off its photo: fitted to it, nearest pixel
+        import cv2
+        outline = cv2.resize(outline.astype(np.uint8), (photo.shape[1], photo.shape[0]),
+                             interpolation=cv2.INTER_NEAREST) > 0
+    if pointmap is not None and tuple(pointmap.shape[:2]) != photo.shape[:2]:  # and a pointmap (torch: the module's)
+        pointmap = torch.nn.functional.interpolate(pointmap.permute(2, 0, 1)[None], size=photo.shape[:2],
+                                                   mode="nearest")[0].permute(1, 2, 0).contiguous()
     rgba = np.concatenate([photo[..., :3], (outline.astype(np.uint8) * 255)[..., None]], axis=-1)
     output = pipeline.run(rgba, None, seed, stage1_only=False, with_mesh_postprocess=False, with_texture_baking=False,
                           with_layout_postprocess=False, use_vertex_color=True, stage1_inference_steps=None,

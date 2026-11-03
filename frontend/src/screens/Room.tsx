@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Loader2, RotateCcw } from 'lucide-react'
-import { STATIC, api, uploadVideo } from '../api'
+import { API_BASE, LIVE, STATIC, api, isSample, uploadVideo } from '../api'
 import CopyLink from '../components/CopyLink'
 import RoomViewer from '../components/RoomViewer'
 import VideoPicker from '../components/VideoPicker'
@@ -33,19 +33,22 @@ export default function Room({ id }: { id: string }) {
 
   useEffect(refresh, [refresh])
 
-  // Keep checking until there's a room or a reason it stopped
+  // Keep checking until there's a room or a reason it stopped, and while a hosted room's things are still being built
+  // (it opens once its walls are done: when the rest is in, its address changes and the 3D view loads it again)
   const status = request?.status
+  const finishing = status === 'READY' && !!request?.stage
   useEffect(() => {
-    if (!status || status === 'READY' || status === 'FAILED') return
-    const timer = setInterval(refresh, status === 'WAITING_FOR_VIDEO' ? 5000 : 2000)
+    if (!status || status === 'FAILED' || (status === 'READY' && !finishing)) return
+    const timer = setInterval(refresh, status === 'WAITING_FOR_VIDEO' || finishing ? 5000 : 2000)
     return () => clearInterval(timer)
-  }, [status, refresh])
+  }, [status, finishing, refresh])
+  const sample = isSample(id)
 
   async function sendBackup(file: File) {
     setError(null)
     setProgress(0)
     try {
-      await uploadVideo(`/api/requests/${id}/video`, file, setProgress)
+      await uploadVideo(`${API_BASE}/api/requests/${id}/video`, file, setProgress)
       refresh()
     } catch (e) {
       setError((e as Error).message)
@@ -82,6 +85,14 @@ export default function Room({ id }: { id: string }) {
         <h1 className="text-2xl font-semibold tracking-tight">{request.label}</h1>
         <span className="rounded-full bg-slate-200 px-3 py-1 text-sm text-slate-700">{STATUS_TEXT[request.status]}</span>
       </div>
+      {sample && (
+        <p className="mt-2 max-w-2xl text-sm text-slate-600">
+          A sample room, already built from a phone video of a real room.{' '}
+          {LIVE
+            ? <a href="/new" className="font-medium text-teal-700 underline">Try it with your own room</a>
+            : 'Building a new room runs on a GPU; the demo video shows one going through.'}
+        </p>
+      )}
 
       {request.status === 'WAITING_FOR_VIDEO' && (
         <section className="mt-6 max-w-xl space-y-3">
@@ -120,7 +131,13 @@ export default function Room({ id }: { id: string }) {
 
       {request.status === 'READY' && room && (
         <section className="mt-6 space-y-4">
-          <RoomViewer url={room.plyUrl} />
+          {finishing && (
+            <p className="flex items-center gap-2 rounded-xl bg-white p-4 text-sm text-slate-700 shadow-sm">
+              <Loader2 size={16} className="animate-spin text-teal-700" />
+              The walls are ready. Now: {request.stage}.
+            </p>
+          )}
+          <RoomViewer url={room.plyUrl} canResize={!sample} />
           <div className="grid gap-4 md:grid-cols-2">
             <div className="rounded-xl bg-white p-5 text-sm text-slate-700 shadow-sm">
               <p className="font-medium text-slate-900">How this room was built</p>
@@ -150,7 +167,7 @@ export default function Room({ id }: { id: string }) {
         </section>
       )}
 
-      {!building && !STATIC && (
+      {!building && !sample && (
         <section className="mt-8 max-w-xl">
           <p className="text-sm text-slate-600">
             {request.status === 'WAITING_FOR_VIDEO'

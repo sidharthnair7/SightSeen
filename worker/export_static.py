@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FILES = ("room.ply", "room-surface.ply", "room-splats.ply", "room-frame.json", "cameras.json", "room-shell.json",
          "room-objects.json")  # at the room's own address
 ASSETS = ("room-things.json", "room-materials.json", "room-shell-textures.json", "room-decals.json",
-          "room-splat-objects.json", "room-issues.json", "video-live.json")  # at <room>/assets/ (the Walk look's room-furniture.ply is left out: debug only)
+          "room-splat-objects.json", "room-issues.json", "video-live.json", "room-spots.json")  # at <room>/assets/ (the Walk look's room-furniture.ply is left out: debug only)
 ASSET_GLOBS = ("room-material-*.jpg", "room-shell-*.jpg", "room-shell-*-seen.png", "room-decal-*.png", "issue-*.jpg")
 BUDGET = 120_000  # triangles a rebuilt thing keeps at most on the web
 VR_BUDGET = 30_000  # and in a headset's copy (vr-<file>): a Quest draws about a million triangles a frame, all told
@@ -57,11 +57,13 @@ def _thin(source, target, budget=BUDGET):
     return before, len(thin.triangles)
 
 
-def export(request_id, target="site"):
+def export(request_id, target="site", api=""):
+    """`api`: the hosted pipeline's address (worker/modal_app.py, deployed): the copy then lets anyone start a room of
+    their own there, and its sample room stays here."""
     data = ROOT / "data" / "requests" / request_id
     site = Path(target) if Path(target).is_absolute() else ROOT / target
     # 1. The viewer in its static mode
-    env = {**os.environ, "VITE_STATIC": "1", "VITE_STATIC_ROOM": request_id}
+    env = {**os.environ, "VITE_STATIC": "1", "VITE_STATIC_ROOM": request_id, "VITE_API_BASE": api.rstrip("/")}
     subprocess.run("npm run build", cwd=ROOT / "frontend", env=env, shell=True, check=True)
     if site.exists():
         shutil.rmtree(site)
@@ -120,6 +122,10 @@ def export(request_id, target="site"):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (2, 3):
-        sys.exit("usage: python worker/export_static.py <request id> [<out folder>]")
-    print(json.dumps(export(*sys.argv[1:]), indent=2))
+    args = sys.argv[1:]
+    api = args.pop(args.index("--api") + 1) if "--api" in args else ""
+    if "--api" in args:
+        args.remove("--api")
+    if len(args) not in (1, 2):
+        sys.exit("usage: python worker/export_static.py <request id> [<out folder>] [--api <hosted pipeline address>]")
+    print(json.dumps(export(*args, api=api), indent=2))

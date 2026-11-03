@@ -81,7 +81,7 @@ def _views(out, thing, upright, answers, cameras, level, lift, scene):
         key = f"{camera['name']}|{thing['name']}"
         if key not in answers:
             continue
-        height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+        height, width = camera["size"]
         small = (height // SHRINK, width // SHRINK)
         masks = [cv2.resize(_mask(r, height, width).astype(np.uint8), (small[1], small[0]),
                             interpolation=cv2.INTER_NEAREST) > 0 for r in _records(answers[key])]

@@ -17,7 +17,8 @@ export type Piece = {
   yawDegrees: number
   /** A move across the upright room in the object's own parent's frame (the splats sit in the turned room group). */
   toLocal?: (move: THREE.Vector3) => THREE.Vector3
-  /** A grey box standing in for a thing SAM 3D couldn't build: its size is a guess, so it's never in the way */
+  /** A grey box standing in for a thing SAM 3D couldn't build, at its measured size: a small one is clutter and never
+   * in the way (take 4's "sock" measured 51 cm tall); a big one is furniture all the same */
   placeholder?: boolean
 }
 
@@ -45,6 +46,7 @@ export type Fit = { wall: number; nearest: { name: string; gap: number } | null;
 
 const FLOOR_REACH = 0.15 // metres: a thing whose bottom is this close to the floor stands on it
 const CLUTTER = 0.1 // metres: anything lower is clutter, not in the way
+const PLACEHOLDER_MIN = 0.4 // metres: a grey box narrower than this both ways is clutter too
 const SPOT_STEP = 0.05 // room units between the spots tried for a new thing
 const SPOT_MARGIN = 0.03 // room units kept clear round a new thing
 
@@ -114,8 +116,13 @@ export function makeMovable(
     const { height } = (box.geometry as THREE.BoxGeometry).parameters
     return box.position.y - height / 2 < FLOOR_REACH / scale() && height >= CLUTTER / scale()
   }
+  // A grey box under PLACEHOLDER_MIN across is clutter whose measured size is a guess
+  const clutter = (box: THREE.Mesh) => {
+    const { width, depth } = (box.geometry as THREE.BoxGeometry).parameters
+    return box.userData.placeholder && Math.max(width, depth) * scale() < PLACEHOLDER_MIN
+  }
   const others = (box: THREE.Mesh | null) => [...boxes.children, ...fixed.children]
-    .filter(other => other !== box && !other.userData.placeholder && standing(other as THREE.Mesh)) as THREE.Mesh[]
+    .filter(other => other !== box && !clutter(other as THREE.Mesh) && standing(other as THREE.Mesh)) as THREE.Mesh[]
 
   const fitOf = (box: THREE.Mesh): Fit | null => {
     if (!shell) return null

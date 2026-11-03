@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 import items
+import pipeline
 import reconstruct
 
 app = FastAPI(title="SightSeen 3D helper")
@@ -31,6 +32,12 @@ class JobIn(BaseModel):
     model: str = "apache"
     fps: float = 2.0
     maxFrames: int = 24
+
+
+class ScaleIn(BaseModel):
+    requestDir: str
+    units: float
+    metres: float
 
 
 class ItemIn(BaseModel):
@@ -79,6 +86,18 @@ def submit_item(item: ItemIn):
     return {"itemId": item.itemId, "state": "queued"}
 
 
+@app.post("/scale")
+def set_scale(scale: ScaleIn):
+    """A real length for a room (two points measured in the viewer, and a tape's answer): the scale, and everything
+    it sizes made again. About a minute of CPU, done here rather than on the GPU's queue."""
+    import room_scale
+
+    try:
+        return room_scale.set_measured(scale.requestDir, scale.units, scale.metres)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+
+
 @app.get("/jobs/{job_id}")
 def status(job_id: str):
     if job_id not in jobs:
@@ -100,6 +119,11 @@ def _work():
         try:
             result = reconstruct.run(job.videoPath, job.outputDir, job.model, job.fps, job.maxFrames,
                                      lambda text, job_id=job.jobId: _update(job_id, stage=text))
+            # Then the rest of the room (walls' photos, scale, things rebuilt, issues): SIGHTSEEN_FULL=0 stops after
+            # the 3D step, SIGHTSEEN_RUNNER picks where SAM 3D runs (local: this PC's card; modal: Modal's GPUs)
+            if os.environ.get("SIGHTSEEN_FULL", "1") == "1":
+                pipeline.finish(job.outputDir, runner=os.environ.get("SIGHTSEEN_RUNNER", "local"),
+                                stage=lambda text, job_id=job.jobId: _update(job_id, stage=text))
             _update(job.jobId, state="done", stage="done", result=result)
         except Exception as error:  # noqa: BLE001 - every failure goes back to the student as a sentence
             traceback.print_exc()

@@ -103,7 +103,7 @@ def compare(out):
     target.mkdir(parents=True, exist_ok=True)
     records, per_frame, sheet = {item["key"]: [] for item in items}, {}, []
     for k, camera in enumerate(cameras):
-        height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+        height, width = camera["size"]
         small = (height // SHRINK, width // SHRINK)
         rows, cols = np.mgrid[0:small[0], 0:small[1]]
         u, v = (cols.ravel() + 0.5) * SHRINK, (rows.ravel() + 0.5) * SHRINK

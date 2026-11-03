@@ -309,7 +309,7 @@ def pick(out):
         candidates, why = [], "SAM 3.1 didn't outline it in any of its frames"
         for k in tries:
             camera = cameras[k]
-            height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+            height, width = camera["size"]
             masks = [_mask(record, height, width) for record in outline(camera["name"], name)]
             masks = [m for m in masks if m.sum() > 200]
             box = item.get("box") if k == first else None
@@ -402,7 +402,7 @@ def _pointmap(out, camera):
     import open3d as o3d
 
     scene, _, _ = _surface(out)
-    height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+    height, width = camera["size"]
     rows, cols = np.mgrid[0:height, 0:width]
     u, v = cols.ravel() + 0.5, rows.ravel() + 0.5
     depth = scene.cast_rays(o3d.core.Tensor(_rays(camera, u, v)))["t_hit"].numpy()
@@ -544,8 +544,11 @@ def _build_locally(out, folder, frames, script="sam3d_local.py", marker="sam3d")
         if (folder / f"{marker}-{stem}.json").exists():
             continue
         pointmap = work / "pointmaps" / f"{stem}.npz"
-        if not pointmap.exists():
+        # (one kept from before frames had their own size, a pixel off on take 3's 320 x 568, is made again)
+        if not pointmap.exists() or tuple(np.load(pointmap)["pointmap"].shape[:2]) != tuple(cameras[name]["size"]):
             np.savez_compressed(pointmap, pointmap=_pointmap(out, cameras[name]))
+        for old in (work / stem).glob("*") if (work / stem).exists() else []:
+            old.unlink()  # a frame built again mustn't read its last run's results
         jobs.append({"photo": _wsl(folder / "photos" / f"{stem}.png"),
                      "outlines": [_wsl(folder / t["slug"] / "outline.png") for t in group],
                      "pointmap": _wsl(pointmap), "out": _wsl(work / stem)})
@@ -643,40 +646,52 @@ def _build_trellis(folder, frames, work, script):
 
 
 def _build_on_modal(out, folder, frames):
+    """SAM 3D on Modal's GPUs, every frame at once: each call can get its own GPU, so a room's things build in about
+    the time of one. From this PC it runs the app for as long as it's needed; inside Modal (the hosted pipeline,
+    SIGHTSEEN_SAM3D_DEPLOYED=1) it calls the deployed app instead."""
     import io
 
     import modal
 
-    from sam3d_modal import Sam3d, app
-
     cameras = {camera["name"]: camera for camera in _cameras(out / "splat-data")}
-    done = []
-    with modal.enable_output(), app.run():
-        sam = Sam3d()
+    done, waiting = [], []
+
+    def send(sam):
         for name, group in frames.items():
             stem = Path(name).stem
-            result_file = folder / f"sam3d-{stem}.json"
-            if result_file.exists():
+            if (folder / f"sam3d-{stem}.json").exists():
                 done.append({"frame": name, "things": [t["slug"] for t in group], "called": False})
                 continue
             buffer = io.BytesIO()
             np.savez_compressed(buffer, pointmap=_pointmap(out, cameras[name]))
-            results = sam.build.remote((folder / "photos" / f"{stem}.png").read_bytes(),
-                                       [(folder / t["slug"] / "outline.png").read_bytes() for t in group],
-                                       buffer.getvalue(), SEED)
+            waiting.append((name, group, sam.build.spawn((folder / "photos" / f"{stem}.png").read_bytes(),
+                                                         [(folder / t["slug"] / "outline.png").read_bytes() for t in group],
+                                                         buffer.getvalue(), SEED)))
+        for name, group, call in waiting:
+            try:
+                results = call.get()
+            except Exception as error:  # noqa: BLE001 - one frame's GPU failing leaves its things as grey boxes
+                results = [{"error": f"{type(error).__name__}: {error}"[:200], "seconds": 0} for _ in group]
             summary = []
             for thing, result in zip(group, results):
-                own = folder / thing["slug"]
                 if "error" in result:
                     summary.append({"thing": thing["slug"], "error": result["error"], "seconds": result["seconds"]})
                     continue
-                _save_object(own, np.frombuffer(result["vertices"], np.float32).reshape(-1, 3),
-                             np.frombuffer(result["faces"], np.int32).reshape(-1, 3),
+                vertices = np.frombuffer(result["vertices"], np.float32).reshape(-1, 3)
+                _save_object(folder / thing["slug"], vertices, np.frombuffer(result["faces"], np.int32).reshape(-1, 3),
                              np.frombuffer(result["colours"], np.uint8).reshape(-1, 3),
                              {k: result[k] for k in ("rotation", "translation", "scale")})
                 summary.append({"thing": thing["slug"], "vertices": len(vertices), "seconds": result["seconds"]})
-            result_file.write_text(json.dumps({"runner": "modal", "things": summary}, indent=2))
+            (folder / f"sam3d-{Path(name).stem}.json").write_text(json.dumps({"runner": "modal", "things": summary},
+                                                                              indent=2))
             done.append({"frame": name, "things": summary, "called": True})
+
+    if os.environ.get("SIGHTSEEN_SAM3D_DEPLOYED") == "1":
+        send(modal.Cls.from_name("sightseen-sam3d", "Sam3d")())
+    else:
+        from sam3d_modal import Sam3d, app
+        with modal.enable_output(), app.run():
+            send(Sam3d())
     return done
 
 
@@ -883,7 +898,7 @@ def _to_measured(vertices_cam, triangles, camera, measured_cam):
     points, then fits it to them (ICP, rigid). Returns the moved vertices and the fit's mean gap in metres."""
     import open3d as o3d
 
-    height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+    height, width = camera["size"]
     seen, _, _ = _visible(vertices_cam, triangles, camera["lens"], (height, width))
     if seen.sum() < 20:
         seen = np.ones(len(vertices_cam), bool)
@@ -1037,7 +1052,7 @@ def measure_big(out):
             if f"{camera['name']}|{thing['name']}" not in answers:
                 answers[f"{camera['name']}|{thing['name']}"] = _outline(images / camera["name"], thing["name"], key)
                 answers_file.write_text(json.dumps(answers))
-            height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+            height, width = camera["size"]
             best = None
             for record in _records(answers[f"{camera['name']}|{thing['name']}"]):
                 mask = _mask(record, height, width)

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { CheckCircle2 } from 'lucide-react'
-import { api, uploadVideo } from '../api'
+import { API_BASE, api, uploadVideo } from '../api'
 import Recorder from '../components/Recorder'
 import VideoPicker from '../components/VideoPicker'
 import { filmingSteps } from '../instructions'
@@ -22,7 +22,7 @@ export default function Film({ token }: { token: string }) {
     setError(null)
     setProgress(0)
     try {
-      await uploadVideo(`/api/film/${token}/video${live ? '?live=true' : ''}`, file, setProgress)
+      await uploadVideo(`${API_BASE}/api/film/${token}/video${live ? '?live=true' : ''}`, file, setProgress)
       setSent(true)
     } catch (e) {
       setError((e as Error).message)

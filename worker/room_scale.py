@@ -38,6 +38,7 @@ PHRASES = ("light switch", "electrical outlet")
 TRIM = 1  # percent trimmed off each side of a plate's hits as edge noise (then widened back)
 MERGE = 0.3  # room units: outlines whose middles are closer are the same plate (plates sit further apart than this)
 BELIEVABLE = (0.5, 2.0)  # standard / measured for a real plate: MapAnything's own scale is never off by 2x
+PLATES_AGREE = 1.3  # the plates' own scales, biggest over smallest, for them to change the room's
 SENSIBLE = {"room-width": (1.5, 15.0), "room-length": (1.5, 15.0), "desk-height": (0.4, 1.2), "bed-height": (0.15, 1.0)}
 TYPES = {"x": "<f4", "y": "<f4", "z": "<f4", "red": "u1", "green": "u1", "blue": "u1", "seen": "u1"}
 
@@ -65,7 +66,7 @@ def measure(out):
 
     sightings = []
     for camera in cameras:
-        height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+        height, width = camera["size"]
         for phrase in PHRASES:
             for record in _records(answers[f"{camera['name']}|{phrase}"]):
                 mask = _mask(record, height, width)
@@ -127,15 +128,25 @@ def measure(out):
     frame_file = out / "room-frame.json"
     frame = json.loads(frame_file.read_text())
     before = frame.get("scale")
+    # Plates change MapAnything's own scale only when two or more agree (each plate's height and width readings,
+    # combined): one plate, or plates that disagree, is a guess no better than MapAnything's (take 3, Nov 3: one plate
+    # made the room 1.95 m wide)
+    per_plate = [float(np.sqrt(np.prod(p["ratios"]))) for p in report if p["kept"]]
+    agree = count >= 2 and max(per_plate) / min(per_plate) <= PLATES_AGREE
+    why = None if agree else (f"only {count} wall plate of a believable size" if count < 2 else
+                              "the wall plates disagree") + ": MapAnything's own scale stays"
     if (frame.get("scaleEvidence") or {}).get("source") == "tape measure":
         frame["plateCheck"] = {"scale": scale, **evidence}  # the tape measure beats the plates: kept beside it
-    else:
+    elif agree:
         frame["scale"] = scale
         frame["scaleEvidence"] = evidence
+    else:
+        frame["plateCheck"] = {"scale": scale, "why": why, **evidence}
+        frame["scale"], frame["scaleEvidence"] = None, None  # (a scale an earlier plate count set goes too)
     frame_file.write_text(json.dumps(frame, indent=2))
     if frame["scale"] != before:
-        _rescale_items(out, frame["scale"])
-    return {"scale": frame["scale"], "plateScale": scale, "before": before, "plates": report}
+        _rescale_items(out, frame["scale"] or 1.0)
+    return {"scale": frame["scale"], "plateScale": scale, "before": before, "why": why, "plates": report}
 
 
 def _rescale_items(out, scale):
@@ -211,6 +222,34 @@ def set_scale(out, what, metres):
     rebuild(out)
     _rescale_items(out, frame["scale"])
     return {"scale": frame["scale"], "before": before, "what": what, "metres": metres, "roomUnits": round(units, 4)}
+
+
+def set_measured(out, units, metres):
+    """A length measured in the viewer (two points, `units` apart in the room's own units) and what a tape measure
+    says it is: any two points will do, in any room (a wall to the wall across, a desk's top to the floor). Sets the
+    scale like `set`, then makes again everything it sizes: the walls, the student's things, the issues' areas.
+    Raises ValueError, in a sentence for the person, when the length can't be right."""
+    out = Path(out)
+    if not units > 0 or not 0.05 <= metres <= 20:
+        raise ValueError("Give a real length between 5 cm and 20 m.")
+    frame_file = out / "room-frame.json"
+    frame = json.loads(frame_file.read_text())
+    before = frame.get("scale")
+    scale = metres / units
+    if before and not 1 / 3 <= scale / before <= 3:
+        raise ValueError(f"That would make the room {scale / before:.1f} times the size it is now. Check the two points "
+                         f"and the length (and that it's in centimetres).")
+    frame["scale"] = round(scale, 4)
+    frame["scaleEvidence"] = {"source": "tape measure", "what": "a length measured in the 3D view", "metres": metres,
+                              "roomUnits": round(units, 4), "before": before,
+                              "plates": (frame.get("scaleEvidence") or {}).get("plates")}
+    frame_file.write_text(json.dumps(frame, indent=2))
+    shell = rebuild(out)
+    _rescale_items(out, frame["scale"])
+    if (out / "room-issues.json").exists():  # its answers are cached, so counting again costs nothing
+        import room_issues
+        room_issues.find(out)
+    return {"scale": frame["scale"], "before": before, "metres": metres, "roomUnits": round(units, 4), **shell}
 
 
 def rebuild(out):

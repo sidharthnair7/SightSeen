@@ -3,7 +3,8 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js'
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark'
-import { AlertTriangle, Camera, Eye, Glasses, Hand, Package, Ruler, RotateCcw, RotateCw, Undo2, X } from 'lucide-react'
+import { AlertTriangle, Camera, ChevronLeft, ChevronRight, Eye, Glasses, Hand, Package, Ruler, RotateCcw, RotateCw, Undo2, X } from 'lucide-react'
+import { STATIC } from '../api'
 import YourThings, { type Item } from './YourThings'
 import Issues, { type IssuesReport, type MeasuredRoom } from './Issues'
 import { SHELL_FACES, type RoomShell } from './walk/types'
@@ -14,6 +15,7 @@ import { loadFurniture } from './walk/furniture'
 import { movableThings, type Fit, type Movable } from './walk/moveThings'
 import { fetchModel, loadRebuilt } from './walk/rebuilt'
 import { makeVr, markPoint, onAssumedCeiling, vrSupported, type Vr } from './walk/vr'
+import { filmedSpots, type Spots } from './walk/filmedSpots'
 
 const MARK = '#f59e0b'
 const WALK_STEP = 0.1 // metres per scroll notch
@@ -129,7 +131,7 @@ function pick(look: Look, hasSplats: boolean, hasSurface: boolean, hasWalk: bool
  * surface when there is one, even in the Real look, because a surface gives a steadier point than a blurry splat.
  * In the dots look, the dot-size slider makes the points bigger, so the room looks less see-through.
  */
-export default function RoomViewer({ url }: { url: string }) {
+export default function RoomViewer({ url, canResize = !STATIC }: { url: string; canResize?: boolean }) {
   const host = useRef<HTMLDivElement>(null)
   const clear = useRef<() => void>(() => {})
   const material = useRef<THREE.PointsMaterial | null>(null)
@@ -154,11 +156,19 @@ export default function RoomViewer({ url }: { url: string }) {
   const [picked, setPicked] = useState(0)
   const [distance, setDistance] = useState<number | null>(null)
   const [toCeiling, setToCeiling] = useState(false) // the measurement reaches a ceiling whose height was assumed
+  const measuredUnits = useRef(0) // the last measurement, in the room's own units
+  const [realCm, setRealCm] = useState('') // what a tape measure says that measurement really is
+  const [scaleBusy, setScaleBusy] = useState(false)
+  const [scaleError, setScaleError] = useState<string | null>(null)
   const scaleRef = useRef(1) // real metres per room unit
   const [roomSize, setRoomSize] = useState<MeasuredRoom | null>(null)
   const [issuesOpen, setIssuesOpen] = useState(false)
   const issueMarks = useRef<THREE.Group | null>(null) // red boxes (damage) and yellow outlines (never filmed)
   const [dots, setDots] = useState(1)
+  const spots = useRef<Spots | null>(null) // the Real look's spots the video was filmed from
+  const spotIndex = useRef(0)
+  const [spot, setSpot] = useState(0)
+  const [spotCount, setSpotCount] = useState(0)
   const [look, setLook] = useState<Look>('real')
   const [hasSplats, setHasSplats] = useState(false)
   const [hasSurface, setHasSurface] = useState(false)
@@ -247,6 +257,57 @@ export default function RoomViewer({ url }: { url: string }) {
     if (issueMarks.current) issueMarks.current.visible = issuesOpen && showing === 'rebuilt'
   }, [issuesOpen, showing])
 
+  // A real length for the last measurement: the server sets the room's scale from it and makes again everything the
+  // scale sizes (about a minute), then the room loads afresh at its real size
+  const applyRealLength = async () => {
+    const cm = Number(realCm)
+    if (toCeiling) {
+      setScaleError("That reaches the ceiling, whose height was assumed. Measure between two things the video filmed.")
+      return
+    }
+    if (!(cm >= 5 && cm <= 2000)) {
+      setScaleError('Type the real length in centimetres (5 to 2000).')
+      return
+    }
+    setScaleBusy(true)
+    setScaleError(null)
+    try {
+      const response = await fetch(`${itemsBase}/scale`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ units: measuredUnits.current, metres: cm / 100 }),
+      })
+      if (!response.ok) {
+        const body = await response.json().catch(() => null)
+        throw new Error(body?.message || `The size couldn't be set (${response.status}).`)
+      }
+      window.location.reload()
+    } catch (problem) {
+      setScaleError(problem instanceof Error ? problem.message : String(problem))
+      setScaleBusy(false)
+    }
+  }
+
+  // The Real look: one filmed spot to the next (or back), by the arrows, the slider or the arrow keys
+  const goSpot = (index: number) => {
+    const next = Math.max(0, Math.min(spotCount - 1, index))
+    spotIndex.current = next
+    setSpot(next)
+    spots.current?.go(next)
+    refreshSplats.current()
+  }
+  useEffect(() => {
+    if (showing !== 'real' || spotCount < 2) return
+    const onKey = (e: KeyboardEvent) => {
+      const typing = e.target instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)
+      if (typing || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight')) return
+      e.preventDefault()
+      goSpot(spotIndex.current + (e.key === 'ArrowRight' ? 1 : -1))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [showing, spotCount])
+
   // One of the student's things, built (its own middle at x = z = 0 and its bottom at y = 0, in the room's units):
   // square to the walls, on the free floor nearest the room's middle (the middle itself when nowhere is free), shown
   // with the rebuilt things and picked up like them
@@ -300,6 +361,8 @@ export default function RoomViewer({ url }: { url: string }) {
     setHeld(null)
     refitView.current()
     if (cloudPoints.current) cloudPoints.current.visible = showing === 'dots'
+    if (showing === 'real') spots.current?.go(spotIndex.current)
+    else spots.current?.release()
     // Spark only rebuilds its splats when the camera moves more than 1 mm or its set of splats changes, and
     // showing splats that were hidden is neither: without this they stay invisible until the first drag
     if (showing === 'real') refreshSplats.current()
@@ -340,6 +403,7 @@ export default function RoomViewer({ url }: { url: string }) {
     controls.rotateSpeed = -0.35 // drag the room the way you'd turn your head
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
+      if (shown.current === 'real' && spots.current) return // the Real look steps between filmed spots instead
       const ahead = new THREE.Vector3()
       camera.getWorldDirection(ahead)
       ahead.multiplyScalar(-Math.sign(e.deltaY) * WALK_STEP)
@@ -439,7 +503,8 @@ export default function RoomViewer({ url }: { url: string }) {
       fetchJson<RoomShell>(url.replace('/room.ply', '/room-shell.json')),
       fetchJson<RoomObjects>(url.replace('/room.ply', '/room-objects.json')),
       vrSupported(),
-    ]).then(([frame, path, found, objects, headset]) => {
+      fetchJson<{ placed: string[] }>(`${assets}room-spots.json`),
+    ]).then(([frame, path, found, objects, headset, placedSpots]) => {
       if (disposed) return
       lightModels.current = headset
       if (frame) {
@@ -589,6 +654,23 @@ export default function RoomViewer({ url }: { url: string }) {
       if (first) vrSpot = { stand: camera.position.clone(), ahead: new THREE.Vector3(0, 0, -1).applyQuaternion(facing) }
       controls.target.copy(camera.position).add(new THREE.Vector3(0, 0, -0.01).applyQuaternion(facing))
       controls.update()
+      // The spots the video was filmed from, upright, for the Real look: the ones COLMAP placed itself when the room
+      // says which (the splats look like the video from there), else every one
+      const placed = path?.filter(spot => placedSpots?.placed?.includes(spot.frame))
+      const steps = placed && placed.length > 1 ? placed : path
+      if (steps && steps.length > 1) {
+        spots.current = filmedSpots(steps.map(spot => {
+          const [w, x, y, z] = spot.quaternion
+          return {
+            position: new THREE.Vector3(spot.position[0], spot.position[1], spot.position[2]).applyMatrix4(room.matrixWorld),
+            quaternion: room.quaternion.clone().multiply(new THREE.Quaternion(x, y, z, w)),
+          }
+        }), camera, controls)
+        spotIndex.current = 0
+        setSpot(0)
+        setSpotCount(steps.length)
+        if (shown.current === 'real') spots.current.go(0)
+      }
       requestAnimationFrame(() => refreshSplats.current())
     })
 
@@ -661,6 +743,7 @@ export default function RoomViewer({ url }: { url: string }) {
       marks.add(marker)
       if (points.length === 2) {
         marks.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: MARK })))
+        measuredUnits.current = points[0].distanceTo(points[1])
         setDistance(points[0].distanceTo(points[1]) * scaleRef.current)
         setToCeiling(onCeiling.some(Boolean))
       } else {
@@ -707,6 +790,7 @@ export default function RoomViewer({ url }: { url: string }) {
       if (renderer.xr.isPresenting) {
         vr.render(seconds)
       } else {
+        spots.current?.tick(time)
         controls.update()
         renderer.render(scene, camera)
       }
@@ -714,6 +798,8 @@ export default function RoomViewer({ url }: { url: string }) {
 
     return () => {
       disposed = true
+      spots.current = null
+      setSpotCount(0)
       renderer.setAnimationLoop(null)
       vr.dispose()
       vrRef.current = null
@@ -777,7 +863,8 @@ export default function RoomViewer({ url }: { url: string }) {
   return (
     <div className="relative h-[70vh] min-h-[420px] overflow-hidden rounded-xl bg-[#10161a]">
       <div ref={host} className="absolute inset-0" />
-      <div className="pointer-events-none absolute left-3 top-3 max-w-xs rounded-lg bg-black/60 px-3 py-2 text-sm text-white">
+      <div className="absolute left-3 top-3 z-10 flex max-w-xs flex-col gap-2">
+      <div className="pointer-events-none rounded-lg bg-black/60 px-3 py-2 text-sm text-white">
         {state === 'loading' && 'Loading the 3D room...'}
         {state === 'error' && 'The 3D room could not be loaded.'}
         {state === 'ready' && moving && (
@@ -810,6 +897,26 @@ export default function RoomViewer({ url }: { url: string }) {
           </span>
         )}
       </div>
+      {state === 'ready' && picked === 2 && distance !== null && canResize && !moving && (
+        <form className="rounded-lg bg-black/60 px-3 py-2 text-xs text-white"
+          onSubmit={event => {
+            event.preventDefault()
+            applyRealLength()
+          }}>
+          <p className="text-white/80">Measured it with a tape? Its real length sets the whole room's size:</p>
+          <div className="mt-1.5 flex items-center gap-1.5">
+            <input value={realCm} onChange={event => setRealCm(event.target.value)} inputMode="decimal" placeholder="74"
+              className="w-16 rounded bg-white/90 px-2 py-1 text-slate-900" aria-label="Its real length in centimetres" />
+            <span>cm</span>
+            <button type="submit" disabled={scaleBusy}
+              className="rounded bg-amber-500 px-2 py-1 font-medium text-black hover:bg-amber-400 disabled:opacity-60">
+              {scaleBusy ? 'Resizing the room (about a minute)...' : 'Set the size'}
+            </button>
+          </div>
+          {scaleError && <p className="mt-1 text-red-300">{scaleError}</p>}
+        </form>
+      )}
+      </div>
       {picked > 0 && (
         <button
           type="button"
@@ -828,7 +935,9 @@ export default function RoomViewer({ url }: { url: string }) {
           onReport={showIssues} room={roomSize} />
       )}
       <p className="pointer-events-none absolute bottom-3 left-3 text-xs text-white/70">
-        Drag to look around, scroll to walk, right-drag to step sideways.
+        {showing === 'real' && spotCount > 1
+          ? 'As filmed: step between the spots the video was filmed from (the arrows), and drag to look around.'
+          : 'Drag to look around, scroll to walk, right-drag to step sideways.'}
       </p>
       {state === 'ready' && (
         <div className="absolute bottom-3 right-3 flex items-center gap-2">
@@ -927,6 +1036,21 @@ export default function RoomViewer({ url }: { url: string }) {
                   <Undo2 size={14} /> Put back
                 </button>
               )}
+            </div>
+          )}
+          {showing === 'real' && spotCount > 1 && (
+            <div className="flex items-center overflow-hidden rounded-lg bg-black/60 text-xs text-white">
+              <button type="button" onClick={() => goSpot(spot - 1)} disabled={spot === 0}
+                className="px-2 py-2 hover:bg-black/40 disabled:opacity-40" aria-label="The spot before" title="The spot before (←)">
+                <ChevronLeft size={14} />
+              </button>
+              <input type="range" min={0} max={spotCount - 1} value={spot} onChange={e => goSpot(Number(e.target.value))}
+                className="w-24 accent-amber-500" aria-label="Filmed spot" />
+              <span className="px-2 tabular-nums">{spot + 1} / {spotCount}</span>
+              <button type="button" onClick={() => goSpot(spot + 1)} disabled={spot === spotCount - 1}
+                className="px-2 py-2 hover:bg-black/40 disabled:opacity-40" aria-label="The next spot" title="The next spot (→)">
+                <ChevronRight size={14} />
+              </button>
             </div>
           )}
           {looks.length > 1 && (

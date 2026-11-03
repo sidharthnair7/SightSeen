@@ -42,7 +42,7 @@ report = []
 for k, camera in enumerate(cameras):
     if only and k not in only:
         continue
-    h, w = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+    h, w = camera["size"]
     eye = level @ FLIP @ (-camera["turn"].T @ camera["shift"]) - lift  # upright
     for p, phrase in enumerate(phrases):
         text = answers.get(f"{camera['name']}|{phrase}")

@@ -20,19 +20,26 @@ async function reason(response: Response): Promise<string> {
  * file next to its other files, and nothing can be uploaded or rebuilt. */
 export const STATIC = import.meta.env.VITE_STATIC === '1'
 export const STATIC_ROOM: string | undefined = import.meta.env.VITE_STATIC_ROOM
+/** The hosted pipeline's address (worker/modal_app.py on Modal), when this copy was built with one: every room but the
+ * sample is built and served there, and anyone can start their own. Empty: the server this page came from. */
+export const API_BASE: string = import.meta.env.VITE_API_BASE ?? ''
+export const LIVE = STATIC && API_BASE !== ''
+/** The static copy's own room, whose files sit next to the page. */
+export const isSample = (id: string) => STATIC && id === STATIC_ROOM
 
 export const api = {
   create: (label: string) =>
-    fetch('/api/requests', {
+    fetch(`${API_BASE}/api/requests`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ label }),
     }).then(r => read<RoomRequest>(r)),
   request: (id: string) =>
-    fetch(STATIC ? `/api/requests/${id}/request.json` : `/api/requests/${id}`).then(r => read<RoomRequest>(r)),
+    fetch(isSample(id) ? `/api/requests/${id}/request.json` : `${API_BASE}/api/requests/${id}`).then(r => read<RoomRequest>(r)),
   rerun: (id: string, model: string) =>
-    fetch(`/api/requests/${id}/rerun?model=${encodeURIComponent(model)}`, { method: 'POST' }).then(r => read<RoomRequest>(r)),
-  film: (token: string) => fetch(`/api/film/${token}`).then(r => read<FilmView>(r)),
+    fetch(`${API_BASE}/api/requests/${id}/rerun?model=${encodeURIComponent(model)}`, { method: 'POST' })
+      .then(r => read<RoomRequest>(r)),
+  film: (token: string) => fetch(`${API_BASE}/api/film/${token}`).then(r => read<FilmView>(r)),
 }
 
 /** Sends a video and reports how much has gone (fetch can't report upload progress; XHR can). */

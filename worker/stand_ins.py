@@ -101,7 +101,7 @@ def _paint(out, points, normals, frames, level, lift, scene):
         photo = cv2.imread(str(out / "frames" / f"{Path(name).stem}.jpg"))
         if photo is None:
             continue
-        height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+        height, width = camera["size"]
         x = room_cv @ camera["turn"].T + camera["shift"]
         ahead = x[:, 2] > 0.05
         z = np.where(ahead, x[:, 2], 1.0)
@@ -255,7 +255,7 @@ def build(out):
         made.append({"name": part["name"], "slug": part["slug"], "file": name, **_box(points),
                      "seenShare": round(float(seen.mean()), 3), "screen": bool(part.get("screen")), "moving": False,
                      "fit": "measured stand-in", "made": part.get("why", "stand-in"),
-                     **({"fixed": True} if part.get("fixed") else {})})
+                     **({"fixed": True} if part.get("fixed") else {}), **({"wall": True} if part.get("wall") else {})})
 
     summary["things"] = made + kept
     summary["standIns"] = {"replaced": sorted(replaced), "moved": sorted(spec.get("moves", {}))}

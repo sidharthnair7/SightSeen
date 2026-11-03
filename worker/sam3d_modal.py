@@ -123,12 +123,18 @@ class Sam3d:
         pointmap = None
         if pointmap_npz:
             pointmap = torch.from_numpy(np.load(io.BytesIO(pointmap_npz))["pointmap"]).float()  # H x W x 3, PyTorch3D axes
+            if tuple(pointmap.shape[:2]) != photo.shape[:2]:  # a pixel off its photo: fitted to it, nearest pixel
+                pointmap = torch.nn.functional.interpolate(pointmap.permute(2, 0, 1)[None], size=photo.shape[:2],
+                                                           mode="nearest")[0].permute(1, 2, 0).contiguous()
         y_up = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=np.float64)  # to_glb's z-up to y-up turn
         results = []
         for outline_png in outline_pngs:
             started = time.perf_counter()
             try:
-                outline = np.array(Image.open(io.BytesIO(outline_png)).convert("L")) > 127
+                outline_image = Image.open(io.BytesIO(outline_png)).convert("L")
+                if outline_image.size != (photo.shape[1], photo.shape[0]):  # a pixel off its photo: fitted to it
+                    outline_image = outline_image.resize((photo.shape[1], photo.shape[0]), Image.NEAREST)
+                outline = np.array(outline_image) > 127
                 output = self.inference(photo, outline, seed=seed, pointmap=pointmap)
                 mesh = output["glb"]
                 local = np.asarray(mesh.vertices, dtype=np.float64) @ y_up.T  # back to the object's own axes

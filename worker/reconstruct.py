@@ -639,6 +639,24 @@ def _write_splat_data(room, points, colours, folder, frames):
     (sparse / "points3D.txt").write_text("\n".join(lines) + "\n")
 
 
+def write_spots(out):
+    """room-spots.json: the frames whose cameras COLMAP placed itself. The rest went back on MapAnything's own cameras
+    and can sit up to 0.7 m off, so the splats look wrong from there; the viewer's Real look steps between these.
+    `python reconstruct.py spots <request folder>`. None when COLMAP didn't run."""
+    import pycolmap
+
+    out = Path(out)
+    model_dir = out / "colmap" / "model" / "0"
+    if not model_dir.exists():
+        return None
+    model = pycolmap.Reconstruction(str(model_dir))
+    placed = sorted(Path(image.name).stem for image in model.images.values() if image.has_pose)
+    spots = {"placed": placed, "why": "COLMAP placed these frames' cameras itself; the others went back on "
+                                      "MapAnything's own and can sit up to 0.7 m off"}
+    (out / "room-spots.json").write_text(json.dumps(spots, indent=2))
+    return spots
+
+
 def write_cameras(out):
     """cameras.json: where the phone stood for every frame the splats trained on, in three.js axes, so the viewer can
     walk the video's path (splats only look like the video from near where it was filmed). Read back from splat-data/,
@@ -813,8 +831,8 @@ def write_room_shell(out):
     # An unfilmed ceiling is never below what the video did film: the room's rebuilt things, when it has them (a real
     # scale can show a room's ceiling is higher than the usual 2.44 m: take 4's curtain rod is 2.60 m up)
     things_file = out / "room-things.json"
-    tallest = max((t["centre"][1] + abs(t["size"][1]) / 2 for t in json.loads(things_file.read_text())["things"]),
-                  default=0.0) if things_file.exists() else 0.0
+    tallest = max((t["centre"][1] + abs(t["size"][1]) / 2 for t in json.loads(things_file.read_text())["things"]
+                   if not t.get("wall")), default=0.0) if things_file.exists() else 0.0  # walls reach it: not furniture
     clear = tallest + CEILING_CLEARANCE / (frame.get("scale") or 1.0) if tallest else 0.0
     height = frame["ceilingHeight"] or max(float(np.percentile(points[:, 1], 99)), assumed, clear)
 
@@ -1012,6 +1030,10 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
     filled = int(len(np.unique(_cells(points, CUBE))))
     _write_splat_data(room, points, colours, out / "splat-data", frames)
     write_cameras(out)
+    try:
+        write_spots(out)
+    except Exception:  # noqa: BLE001 - the Real look then steps between every frame
+        pass
     room.clear()
     points = points * np.array([1.0, -1.0, -1.0], dtype=np.float32)  # OpenCV axes to three.js axes
     write_ply(out / "room.ply", points, colours)
@@ -1088,6 +1110,8 @@ if __name__ == "__main__":
 
     if len(sys.argv) == 3 and sys.argv[1] == "cameras":
         print(write_cameras(sys.argv[2]), "camera spots written")
+    elif len(sys.argv) == 3 and sys.argv[1] == "spots":
+        print(json.dumps(write_spots(sys.argv[2]), indent=2))
     elif len(sys.argv) == 3 and sys.argv[1] == "frame":
         print(json.dumps(write_room_frame(sys.argv[2], keep_scale=True), indent=2))
     elif len(sys.argv) == 3 and sys.argv[1] == "shell":

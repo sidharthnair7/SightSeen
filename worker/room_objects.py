@@ -45,20 +45,22 @@ def _turn(w, x, y, z):
 
 
 def _cameras(splat_data):
-    """Each frame's lens and world-to-camera turn and shift, from splat-data's COLMAP text files."""
+    """Each frame's lens, its picture's size (rows, columns) and its world-to-camera turn and shift, from
+    splat-data's COLMAP text files."""
     sparse = splat_data / "sparse" / "0"
-    lenses = {}
+    lenses, sizes = {}, {}
     for line in (sparse / "cameras.txt").read_text().splitlines():
         if line and not line.startswith("#"):
             number, _, width, height, fx, fy, cx, cy = line.split()
             lenses[number] = np.array([[float(fx), 0, float(cx)], [0, float(fy), float(cy)], [0, 0, 1]])
+            sizes[number] = (int(height), int(width))
     frames = []
     for line in (sparse / "images.txt").read_text().splitlines():
         parts = line.split()
         if len(parts) == 10 and not line.startswith("#"):
             qw, qx, qy, qz, tx, ty, tz = map(float, parts[1:8])
-            frames.append({"name": parts[9], "lens": lenses[parts[8]], "turn": _turn(qw, qx, qy, qz),
-                           "shift": np.array([tx, ty, tz])})
+            frames.append({"name": parts[9], "lens": lenses[parts[8]], "size": sizes[parts[8]],
+                           "turn": _turn(qw, qx, qy, qz), "shift": np.array([tx, ty, tz])})
     return sorted(frames, key=lambda frame: frame["name"])
 
 

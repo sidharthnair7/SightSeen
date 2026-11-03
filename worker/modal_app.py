@@ -1,19 +1,41 @@
-"""SightSeen's 3D step on Modal: one MapAnything run over the whole video on a 24 GB GPU, so a room needs no parts and
-no joins (an 8 GB GPU can only take about 24 frames in one run). Run it from worker/ with the helper's venv:
+"""SightSeen on Modal. Two ways in:
 
-    .venv\\Scripts\\python.exe -m modal run modal_app.py --video <video file> --out <folder>
+1. Hosted, for anyone with the link (the hackathon's judges): a small web app takes a room's video (from the
+   student's page, or live from the landlord's link), a GPU rebuilds the room in 3D, and the rest of the pipeline
+   (worker/pipeline.py: the walls' photos, the scale, the things rebuilt by SAM 3D on Modal's GPUs at once, the issues)
+   runs after it. The room opens as soon as its walls are done; its things come in a few minutes later. The page stays
+   on Cloudflare Pages and talks to this app's address (VITE_API_BASE when it's built). Splats (the Real look) aren't
+   made here yet: Brush isn't in the cloud image, so hosted rooms show the Rebuilt look.
 
-It writes what reconstruct.run writes (room.ply, room-surface.ply, splat-data/, result.json) into --out. The splats
-are trained afterwards on this PC with Brush, which isn't in the cloud image yet.
+       .venv\\Scripts\\python.exe -m modal deploy sam3d_modal.py     (SAM 3D, once: the hosted pipeline calls it)
+       .venv\\Scripts\\python.exe -m modal deploy modal_app.py       (this app; its address is printed)
+
+   Modal runs no GPU without a card on file (the credits pay; set a spend limit). The keys come from the repo's .env
+   (MODEL_API_KEY, HF_TOKEN) when it's deployed, as Modal secrets.
+
+2. The 3D step alone, from this PC (one MapAnything run over the whole video on a 24 GB GPU):
+
+       .venv\\Scripts\\python.exe -m modal run modal_app.py --video <video file> --out <folder>
 """
 
 import io
+import json
+import os
+import re
+import secrets
+import sys
+import time
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import modal
 
 app = modal.App("sightseen")
+WORKER = Path(__file__).resolve().parent
+# Modal won't start an app with GPU functions until there's a card on file, so SIGHTSEEN_GPU="" leaves it GPU-less,
+# which is enough for check() (`modal run modal_app.py` with no video)
+GPU = os.environ.get("SIGHTSEEN_GPU", "L4") or None
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -22,19 +44,275 @@ image = (
     .pip_install("git+https://github.com/facebookresearch/map-anything.git")
     .pip_install("opencv-python-headless", "plotly==7.1.0", "dash==4.5.0", "pycolmap==4.2.1")
     .pip_install("open3d==0.20.0", extra_options="--no-deps")
+    # what the rest of the pipeline imports (worker/pipeline.py): the things' clustering, meshes, the Meta Model API
+    .pip_install("scikit-learn", "scipy", "trimesh", "requests", "pillow", "meta-sam-parser==0.1.0")
+    # Open3D loads EGL and a few X libraries when it's imported, even without a screen (as SAM 3D's image has them)
+    .apt_install("libegl1", "libxrender1", "libxi6", "libxkbcommon0", "libsm6", "libxext6", "libxfixes3", "libxxf86vm1",
+                 "libusb-1.0-0")
     .env({"HF_HOME": "/models"})
-    .add_local_python_source("reconstruct")
+    # the pipeline's Python only: not Brush (vendor/, this PC's splat trainer, whose caches change while it runs)
+    .add_local_dir(WORKER, "/root/worker", ignore=[".venv", "vendor", "target", "**/__pycache__", "*.pyc", "*.log"])
 )
+web_image = modal.Image.debian_slim(python_version="3.12").pip_install("fastapi", "python-multipart")
 
 # MapAnything's 4.9 GB checkpoint is downloaded into this volume once and reused by every later run
 models = modal.Volume.from_name("sightseen-models", create_if_missing=True)
+rooms = modal.Volume.from_name("sightseen-rooms", create_if_missing=True)  # /rooms/<request id>/: video and room
+state = modal.Dict.from_name("sightseen-state", create_if_missing=True)  # request:<id> -> its record, token:<t> -> id
 
 
-# Modal runs no GPU at all without a payment method on file (L4 and T4 were both refused on Nov 1), so this waits
-# for the hackathon credits. An L4's 24 GB fits a whole video in one run.
-@app.function(image=image, gpu="L4", volumes={"/models": models}, timeout=1800)
+def _keys():
+    """MODEL_API_KEY and HF_TOKEN from the repo's .env (on this PC), as a secret for the containers."""
+    found = {}
+    env = WORKER.parent / ".env"
+    if env.exists():
+        for line in env.read_text(encoding="utf-8").splitlines():
+            name, sep, value = line.partition("=")
+            if sep and name.strip() in ("MODEL_API_KEY", "HF_TOKEN") and value.strip():
+                found[name.strip()] = value.strip().strip('"')
+    return modal.Secret.from_dict(found)
+
+
+def _update(request_id, **fields):
+    """A request's record, changed. Records live in the Dict so the web app sees progress straight away."""
+    record = state.get(f"request:{request_id}") or {}
+    record.update(fields)
+    state[f"request:{request_id}"] = record
+    return record
+
+
+@app.function(image=image, gpu=GPU, volumes={"/models": models, "/rooms": rooms}, secrets=[_keys()], timeout=1800)
+def reconstruct_room(request_id: str):
+    """The 3D step on a GPU (MapAnything, then COLMAP for the cameras), then the rest of the room on a CPU."""
+    sys.path.insert(0, "/root/worker")
+    import reconstruct
+
+    out = Path("/rooms") / request_id
+    rooms.reload()
+    video = next(out.glob("video.*"))
+    _update(request_id, status="RECONSTRUCTING", stage="starting the GPU", failureMessage=None)
+    try:
+        result = reconstruct.run(video, out, "apache", 2.0, 200,
+                                 lambda text: _update(request_id, stage=text))
+    except Exception as error:  # noqa: BLE001 - the page shows why, in a sentence
+        _update(request_id, status="FAILED", stage=None, failureMessage=reconstruct.explain(error))
+        return
+    finally:
+        models.commit()
+    rooms.commit()
+    room = {k: result.get(k) for k in ("frames", "seconds", "peakVramGb", "scaleFactor", "points", "sizeX", "sizeY",
+                                       "sizeZ")}
+    _update(request_id, room=room, stage="putting the video's photos on the walls")
+    finish_room.spawn(request_id)
+
+
+@app.function(image=image, cpu=8, memory=16384, volumes={"/rooms": rooms}, secrets=[_keys()], timeout=3600)
+def finish_room(request_id: str):
+    """worker/pipeline.py on the room: it opens once its walls are done, and its things come in when they're built
+    (SAM 3D on the deployed sightseen-sam3d app, every frame at once)."""
+    sys.path.insert(0, "/root/worker")
+    os.environ["SIGHTSEEN_SAM3D_DEPLOYED"] = "1"
+    import pipeline
+
+    out = Path("/rooms") / request_id
+    rooms.reload()
+
+    def walls_done():
+        rooms.commit()
+        record = state.get(f"request:{request_id}") or {}
+        _update(request_id, status="READY", room={**(record.get("room") or {}), "version": int(time.time())},
+                stage="rebuilding the room's things in 3D (a few minutes; the page updates when they're in)")
+
+    try:
+        pipeline.finish(out, runner="modal", stage=lambda text: _update(request_id, stage=text), walls_done=walls_done)
+    finally:
+        rooms.commit()
+        record = state.get(f"request:{request_id}") or {}
+        _update(request_id, status="READY", stage=None, room={**(record.get("room") or {}), "version": int(time.time())})
+
+
+@app.function(image=image, cpu=4, memory=8192, volumes={"/rooms": rooms}, secrets=[_keys()], timeout=600)
+def set_room_scale(request_id: str, units: float, metres: float) -> dict:
+    """A real length for a room (worker/room_scale.py's set_measured): the walls and the issues made again."""
+    sys.path.insert(0, "/root/worker")
+    import room_scale
+
+    rooms.reload()
+    try:
+        result = room_scale.set_measured(Path("/rooms") / request_id, units, metres)
+    except ValueError as error:
+        return {"error": str(error)}
+    rooms.commit()
+    record = state.get(f"request:{request_id}") or {}
+    _update(request_id, room={**(record.get("room") or {}), "version": int(time.time())})
+    return result
+
+
+SAFE_FILE = re.compile(r"[a-z0-9][a-z0-9.-]*\.(json|png|jpg|ply)")
+VIDEO_TYPES = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
+
+
+@app.function(image=web_image, volumes={"/rooms": rooms}, timeout=900)
+@modal.concurrent(max_inputs=40)
+@modal.asgi_app()
+def web():
+    """The API the page uses, at the same paths as the Spring Boot server's (src/main/java), so the page doesn't
+    change; errors come back as {"message": ...} like Spring's. Plain handlers: FastAPI runs them on threads, and
+    Modal's own calls (the Dict, the volume, starting a GPU) wait."""
+    import shutil
+    import uuid
+
+    from fastapi import FastAPI, File, Request, UploadFile
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse, JSONResponse
+    from pydantic import BaseModel
+
+    class Start(BaseModel):
+        label: str
+
+    class Length(BaseModel):
+        units: float
+        metres: float
+
+    api = FastAPI(title="SightSeen hosted")
+    api.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+    last_reload = [0.0]
+
+    def fail(status, message):
+        return JSONResponse({"message": message}, status_code=status)
+
+    def base_of(request):
+        return str(request.base_url).rstrip("/").replace("http://", "https://")
+
+    def record_of(request_id):
+        return state.get(f"request:{request_id}") if re.fullmatch(r"[0-9a-f-]{36}", request_id) else None
+
+    def view(record, base):
+        room = record.get("room") if record.get("status") == "READY" else None
+        if room:
+            room = {**room, "plyUrl": f"{base}/api/requests/{record['id']}/room.ply?v={room.get('version', 0)}"}
+        return {"id": record["id"], "label": record["label"], "status": record["status"], "stage": record.get("stage"),
+                "landlordPath": f"/film/{record['token']}", "roomPath": f"/room/{record['id']}",
+                "createdAt": record["createdAt"], "videoSource": record.get("videoSource"), "model": "apache",
+                "room": room, "failureMessage": record.get("failureMessage")}
+
+    def receive(request_id, video, source, live):
+        """Saves the video next to the room, marks how it came in, and starts the GPU."""
+        ext = Path(video.filename or "").suffix.lower()
+        if ext not in VIDEO_TYPES:
+            return fail(400, "That isn't a video this can read: use an MP4, MOV or WebM.")
+        folder = Path("/rooms") / request_id
+        folder.mkdir(parents=True, exist_ok=True)
+        for old in folder.glob("video.*"):
+            old.unlink()
+        with open(folder / f"video{ext}", "wb") as saved:
+            shutil.copyfileobj(video.file, saved, 8 * 1024 * 1024)
+        marker = folder / "video-live.json"
+        if live:
+            marker.write_text(json.dumps({"recordedInPage": True, "at": datetime.now(timezone.utc).isoformat()}))
+        elif marker.exists():
+            marker.unlink()
+        rooms.commit()
+        record = _update(request_id, status="VIDEO_RECEIVED", stage="waiting for a GPU", videoSource=source,
+                         failureMessage=None)
+        reconstruct_room.spawn(request_id)
+        return record
+
+    @api.post("/api/requests")
+    def create(body: Start, request: Request):
+        label = body.label.strip()[:120]
+        if not label:
+            return fail(400, "Say which place it is.")
+        request_id = str(uuid.uuid4())
+        token = secrets.token_urlsafe(9).replace("_", "x").replace("-", "y")
+        record = {"id": request_id, "label": label, "token": token, "status": "WAITING_FOR_VIDEO",
+                  "createdAt": datetime.now(timezone.utc).isoformat()}
+        state[f"request:{request_id}"] = record
+        state[f"token:{token}"] = request_id
+        return view(record, base_of(request))
+
+    @api.get("/api/requests/{request_id}")
+    @api.get("/api/requests/{request_id}/request.json")
+    def read(request_id: str, request: Request):
+        record = record_of(request_id)
+        return view(record, base_of(request)) if record else fail(404, "No request with that link.")
+
+    @api.post("/api/requests/{request_id}/video")
+    def upload(request_id: str, request: Request, video: UploadFile = File(...)):
+        record = record_of(request_id)
+        if not record:
+            return fail(404, "No request with that link.")
+        if record["status"] in ("VIDEO_RECEIVED", "RECONSTRUCTING"):
+            return fail(409, "A video is already being built into a room. Wait for it to finish.")
+        done = receive(request_id, video, "STUDENT_UPLOAD", False)
+        return done if isinstance(done, JSONResponse) else view(done, base_of(request))
+
+    @api.get("/api/film/{token}")
+    def film(token: str):
+        request_id = state.get(f"token:{token}")
+        record = record_of(request_id) if request_id else None
+        if not record:
+            return fail(404, "This link doesn't lead anywhere. Ask the student for a new one.")
+        return {"label": record["label"], "videoReceived": record["status"] != "WAITING_FOR_VIDEO"}
+
+    @api.post("/api/film/{token}/video")
+    def film_upload(token: str, live: bool = False, video: UploadFile = File(...)):
+        request_id = state.get(f"token:{token}")
+        record = record_of(request_id) if request_id else None
+        if not record:
+            return fail(404, "This link doesn't lead anywhere. Ask the student for a new one.")
+        if record["status"] in ("VIDEO_RECEIVED", "RECONSTRUCTING"):
+            return fail(409, "A video is already being built into a room.")
+        done = receive(request_id, video, "LANDLORD_LINK", live)
+        return done if isinstance(done, JSONResponse) else {"ok": True}
+
+    @api.post("/api/requests/{request_id}/scale")
+    def scale(request_id: str, body: Length):
+        if not record_of(request_id):
+            return fail(404, "No request with that link.")
+        if not body.units > 0 or not 0.05 <= body.metres <= 20:
+            return fail(400, "Give a real length between 5 cm and 20 m.")
+        result = set_room_scale.remote(request_id, body.units, body.metres)
+        return fail(400, result["error"]) if "error" in result else result
+
+    @api.get("/api/requests/{request_id}/items")
+    @api.get("/api/requests/{request_id}/items.json")
+    def items(request_id: str):
+        return []  # the student's own things are built on SightSeen's own GPU for now, not in the hosted copy
+
+    @api.post("/api/requests/{request_id}/items")
+    def add_item(request_id: str):
+        return fail(400, "Adding your own things isn't in the hosted version yet.")
+
+    @api.post("/api/requests/{request_id}/rerun")
+    def rerun(request_id: str):
+        return fail(400, "Building again with another model isn't in the hosted version.")
+
+    @api.get("/api/requests/{request_id}/{name}")
+    @api.get("/api/requests/{request_id}/assets/{name}")
+    def file(request_id: str, name: str):
+        if not record_of(request_id) or not SAFE_FILE.fullmatch(name):
+            return fail(404, "No such file.")
+        path = Path("/rooms") / request_id / name
+        # Another container wrote the room: look again now and then, and whenever a file isn't there yet
+        if not path.exists() or time.time() - last_reload[0] > 5:
+            try:
+                rooms.reload()
+                last_reload[0] = time.time()
+            except Exception:  # noqa: BLE001 - a file still being sent keeps the old view; it's seconds old
+                pass
+        if not path.exists():
+            return fail(404, "No such file.")
+        return FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+    return api
+
+
+# The 3D step alone, from this PC (the room's files come back as a zip) -------------------------------------------
+@app.function(image=image, gpu=GPU, volumes={"/models": models}, timeout=1800)
 def rebuild(video: bytes, name: str, fps: float, frames_per_run: int) -> bytes:
     """The whole 3D step in the cloud. Returns the room's files as a zip (the video and its frames stay behind)."""
+    sys.path.insert(0, "/root/worker")
     import reconstruct
 
     work = Path("/tmp/room")
@@ -51,9 +329,31 @@ def rebuild(video: bytes, name: str, fps: float, frames_per_run: int) -> bytes:
     return buffer.getvalue()
 
 
+@app.function(image=image, timeout=600)
+def check() -> dict:
+    """Everything the hosted pipeline needs imports (no GPU): the first deploy's quick test."""
+    import importlib
+
+    sys.path.insert(0, "/root/worker")
+    found = {}
+    for module in ("torch", "mapanything", "pycolmap", "open3d", "cv2", "sklearn", "scipy", "trimesh", "meta_sam_parser",
+                   "reconstruct", "pipeline", "rebuild_things", "room_issues", "room_scale", "room_textures",
+                   "room_materials"):
+        try:
+            importlib.import_module(module)
+            found[module] = "ok"
+        except Exception as error:  # noqa: BLE001 - the report is the point
+            found[module] = f"FAILED {type(error).__name__}: {error}"[:300]
+    return found
+
+
 @app.local_entrypoint()
-def main(video: str, out: str, fps: float = 2.0, frames_per_run: int = 200):
-    """frames_per_run is high on purpose: up to 200 frames go into a single run, so there are no parts."""
+def main(video: str = "", out: str = "", fps: float = 2.0, frames_per_run: int = 200):
+    """frames_per_run is high on purpose: up to 200 frames go into a single run, so there are no parts. With no video,
+    it checks the hosted pipeline's image instead."""
+    if not video:
+        print(json.dumps(check.remote(), indent=2))
+        return
     files = rebuild.remote(Path(video).read_bytes(), Path(video).name, fps, frames_per_run)
     Path(out).mkdir(parents=True, exist_ok=True)
     zipfile.ZipFile(io.BytesIO(files)).extractall(out)

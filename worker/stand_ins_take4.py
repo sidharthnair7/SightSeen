@@ -182,21 +182,6 @@ door_colour = median_colour((14, 15), "door")
 SCALE = json.loads((out / "room-frame.json").read_text()).get("scale") or 1.0
 DOOR_W, DOOR_H, KNOB = 0.81 / SCALE, 2.03 / SCALE, 0.91 / SCALE
 LATCH = 1.91
-door = [
-    # unseen parts a light door white: the frames saw it in the hall light's shadow (median door_colour)
-    face_box(back, LATCH - DOOR_W, LATCH, 0.0, DOOR_H, -0.0175, 0.0175, [206, 204, 198], paint=True,
-             paintFacing=inward_back),
-    face_box(back, LATCH - DOOR_W - 0.065, LATCH - DOOR_W, 0.0, DOOR_H + 0.065, 0.0, 0.02, WHITE),  # casing
-    face_box(back, LATCH, LATCH + 0.055, 0.0, DOOR_H + 0.065, 0.0, 0.02, WHITE),
-    face_box(back, LATCH - DOOR_W - 0.065, LATCH + 0.055, DOOR_H, DOOR_H + 0.065, 0.0, 0.02, WHITE),
-    face_box(back, 1.835, 1.865, KNOB - 0.015, KNOB + 0.015, 0.0175, 0.04, [150, 150, 154]),  # knob: its neck
-    face_box(back, 1.825, 1.875, KNOB - 0.025, KNOB + 0.025, 0.04, 0.065, [172, 172, 176]),  # and its round end
-]
-switch = [
-    face_box(back, 1.969, 2.031, 0.87, 0.97, 0.0, 0.006, [226, 216, 190]),  # a standard single plate, in the room's units
-    face_box(back, 1.994, 2.006, 0.908, 0.932, 0.006, 0.016, [232, 224, 198]),  # toggle
-]
-
 # ---- The bed, in the shell's own axes (x across: the left wall at -half; z along: the window wall at -half) ----
 def local_box(x0, x1, y0, y1, z0, z1, colour, **extra):
     middle = centre + np.array([(x0 + x1) / 2, 0.0, (z0 + z1) / 2]) @ box_axes
@@ -210,6 +195,55 @@ def local_box(x0, x1, y0, y1, z0, z1, colour, **extra):
 # against the wall, its mattress top at 0.46 (the bedding's level), on a wooden frame with legs
 WOOD_BED = [146, 108, 74]  # the frame's honey wood (frames 19-25)
 BX0, BX1, BZ0, BZ1, TOP_BED = -half[0] + 0.01, 0.0, -1.15, 0.45, 0.46
+
+# The alcove (the owner's photos, Nov 3): the door is set back, and the wall to its right (seen from the room) juts in
+# as far as the bed's head, which stands against it. The video's box of a room can't have that, so it's a block of wall
+# from the left wall to just past the alcove's switch, from the bed's head back to the door's wall, floor to ceiling
+x_of = lambda column: float((back[0](column, 0.0, 0.0) - centre) @ x_axis)  # a back-wall column, in the shell's x
+BUMP_X = x_of(2.071)  # the jutting wall's side: just past where frames 13-15 put the door's latch side and its switch
+alcove = [local_box(-half[0] - 0.01, BUMP_X, 0.0, 2 * half[1] + 0.02, BZ1 + 0.005, half[2] + 0.01,
+                    [int(c) for c in shell["faces"]["back"]])]
+
+# The door is in the jutting wall's side, facing the wardrobe's left side (the owner's note, Nov 3): hinged at the back
+# wall's corner, its latch and knob toward the room, then a narrow strip with a switch before the side's outer corner.
+# A standard door in real metres (rule 1); left unpainted (the frames that saw it sit on MapAnything's own cameras)
+CASE = 0.065  # its casing, in the room's units
+D_HINGE = half[2] - 0.01  # the hinge side's casing starts at the back corner
+D_LATCH = D_HINGE - CASE - DOOR_W  # the door's latch edge, toward the room
+door = [
+    local_box(BUMP_X - 0.0175, BUMP_X + 0.0175, 0.0, DOOR_H, D_LATCH, D_HINGE - CASE, [206, 204, 198]),
+    local_box(BUMP_X, BUMP_X + 0.02, 0.0, DOOR_H + CASE, D_HINGE - CASE, D_HINGE, WHITE),  # casing: hinge side
+    local_box(BUMP_X, BUMP_X + 0.02, 0.0, DOOR_H + CASE, D_LATCH - 0.055, D_LATCH, WHITE),  # latch side
+    local_box(BUMP_X, BUMP_X + 0.02, DOOR_H, DOOR_H + CASE, D_LATCH - 0.055, D_HINGE, WHITE),  # head
+    local_box(BUMP_X + 0.0175, BUMP_X + 0.04, KNOB - 0.015, KNOB + 0.015, D_LATCH + 0.045, D_LATCH + 0.075,
+              [150, 150, 154]),  # knob: its neck
+    local_box(BUMP_X + 0.04, BUMP_X + 0.065, KNOB - 0.025, KNOB + 0.025, D_LATCH + 0.035, D_LATCH + 0.085,
+              [172, 172, 176]),  # and its round end
+]
+
+# The switches (the owner's photos, Nov 3): one on the jutting wall's side past the latch casing, about 1.05 m up;
+# two stacked on the back wall between the corner and the wardrobe, about 1.15 and 1.35 m up. A standard single plate
+# is 11.4 x 7.0 cm
+PLATE_H, PLATE_W = 0.114 / SCALE, 0.070 / SCALE
+slope = x_of(1.0) - x_of(0.0)  # +1 or -1: which way the back wall's columns run in the shell's x
+column_of = lambda x: (x - x_of(0.0)) / slope
+
+
+def plate(column, middle):
+    return [face_box(back, column - PLATE_W / 2, column + PLATE_W / 2, middle - PLATE_H / 2, middle + PLATE_H / 2,
+                     0.0, 0.006, [226, 216, 190]),
+            face_box(back, column - 0.006, column + 0.006, middle - 0.012, middle + 0.012, 0.006, 0.016,
+                     [232, 224, 198])]  # its toggle
+
+
+side_z = (D_LATCH - 0.055 + BZ1 + 0.005) / 2  # the strip between the latch casing and the side's outer corner
+side_y = 1.05 / SCALE
+switch = [
+    local_box(BUMP_X, BUMP_X + 0.006, side_y - PLATE_H / 2, side_y + PLATE_H / 2, side_z - PLATE_W / 2,
+              side_z + PLATE_W / 2, [226, 216, 190]),
+    local_box(BUMP_X + 0.006, BUMP_X + 0.016, side_y - 0.012, side_y + 0.012, side_z - 0.006, side_z + 0.006,
+              [232, 224, 198]),
+] + plate(column_of(BUMP_X + 0.25), 1.15 / SCALE) + plate(column_of(BUMP_X + 0.25), 1.35 / SCALE)
 bedding_colour = median_colour(range(16, 26), "bed")
 bed = [
     local_box(BX0 + 0.01, BX1 - 0.02, 0.20, TOP_BED, BZ0 + 0.01, BZ1 - 0.01, bedding_colour, paint=True,
@@ -313,8 +347,10 @@ spec = {
          "paintFrom": ["frame_0013.png", "frame_0014.png", "frame_0015.png"]},
         {"slug": "heater", "name": "baseboard heater", "fixed": True, "boxes": heater,
          "why": "measured stand-in: a baseboard heater"},
-        {"slug": "light-switch", "name": "light switch", "fixed": True, "boxes": switch,
-         "why": "measured stand-in: a switch plate"},
+        {"slug": "light-switch", "name": "light switches", "fixed": True, "boxes": switch,
+         "why": "stand-in from the owner's photos: three switch plates"},
+        {"slug": "alcove-wall", "name": "wall", "fixed": True, "wall": True, "boxes": alcove,
+         "why": "stand-in from the owner's photos: the wall that juts in beside the door, the bed's head against it"},
         {"slug": "computer-monitor", "name": "computer monitor", "screen": True, "boxes": b_boxes,
          "why": "measured stand-in: panel with a black screen, on a stand"},
         {"slug": "computer-monitor-2", "name": "computer monitor", "screen": True, "boxes": a_boxes,

@@ -26,12 +26,20 @@ public class WorkerClient {
     public record ItemJob(String itemId, String requestDir) {
     }
 
+    /**
+     * A real length for the room: two points measured in the viewer (room units apart) and what a tape says they are.
+     * The helper sets the room's scale from it and makes again everything the scale sizes.
+     */
+    public record ScaleRequest(String requestDir, double units, double metres) {
+    }
+
     /** The helper's answer about a job: state is queued, running, done or failed. */
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record JobStatus(String jobId, String state, String stage, String message, RoomStats result) {
     }
 
     private final RestClient http;
+    private final RestClient slow; // the scale: the walls' photos and materials are made again, which takes a minute
 
     public WorkerClient(SightSeenProperties props) {
         HttpClient client = HttpClient.newBuilder()
@@ -41,6 +49,18 @@ public class WorkerClient {
         JdkClientHttpRequestFactory factory = new JdkClientHttpRequestFactory(client);
         factory.setReadTimeout(Duration.ofSeconds(15));
         this.http = RestClient.builder().baseUrl(props.worker().url()).requestFactory(factory).build();
+        JdkClientHttpRequestFactory patient = new JdkClientHttpRequestFactory(client);
+        patient.setReadTimeout(Duration.ofMinutes(4));
+        this.slow = RestClient.builder().baseUrl(props.worker().url()).requestFactory(patient).build();
+    }
+
+    /** Sets the room's scale from a real length (worker/room_scale.py); the helper's JSON answer as it is. */
+    public String setScale(ScaleRequest scale) {
+        return slow.post().uri("/scale")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(scale)
+                .retrieve()
+                .body(String.class);
     }
 
     public JobStatus submit(JobRequest job) {

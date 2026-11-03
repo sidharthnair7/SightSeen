@@ -118,7 +118,7 @@ def find(out):
         seen = []
         for f in item["frames"]:
             camera = cameras[f]
-            height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+            height, width = camera["size"]
             for record in _records(answers.get(f"{camera['name']}|{name}") or ""):
                 mask = _mask(record, height, width)
                 if mask.sum() < 30:
