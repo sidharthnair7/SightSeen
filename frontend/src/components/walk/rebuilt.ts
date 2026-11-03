@@ -5,7 +5,16 @@ import type { RoomShell } from './types'
 
 /** room-things.json (worker/rebuild_things.py): the room's things rebuilt whole by SAM 3D, in the upright room. */
 type RebuiltThings = {
-  things: { name: string; file: string; centre: number[]; size: number[]; yawDegrees: number; seenShare: number }[]
+  things: {
+    name: string
+    file: string
+    centre: number[]
+    size: number[]
+    yawDegrees: number
+    seenShare: number
+    /** Built into the room (a window, a door): drawn, but not one of the things you can move */
+    fixed?: boolean
+  }[]
   failed: { name: string; box?: { centre: number[]; size: number[]; yawDegrees: number } | null }[]
 }
 
@@ -58,11 +67,13 @@ export async function loadRebuilt(
     const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
     mesh.name = thing.name
     group.add(mesh)
-    pieces.push({ ...thing, object: mesh })
+    if (!thing.fixed) pieces.push({ ...thing, object: mesh })
   }))
   for (const thing of found.failed ?? []) {
     if (!thing.box) continue
-    const { centre, size, yawDegrees } = thing.box
+    const { centre, yawDegrees } = thing.box
+    // (a box measured below the floor came out with a negative height: a flat thing lying on it)
+    const size = thing.box.size.map(side => Math.max(Math.abs(side), 0.01))
     const geometry = new THREE.BoxGeometry(size[0], size[1], size[2])
     const block = new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ color: '#9aa0a6' }))
     block.add(new THREE.LineSegments(new THREE.EdgesGeometry(geometry), new THREE.LineBasicMaterial({ color: '#1f2933' })))

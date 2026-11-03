@@ -9,19 +9,24 @@ For each thing standing in the room:
      most whole and a rough box round it there. SAM 3.1 outlines it in that frame (the outline whose box best matches
      Muse Spark's). Screens in that frame are outlined too and painted black. Rays through the outlined pixels hit the
      room's fused surface (room-surface.ply): those are the thing's measured points, in metres.
-  2. build: SAM 3D Objects (run by fal.ai, since it needs a 32 GB graphics card) builds every outlined thing of a frame
-     from that frame, one call per frame.
-  3. place: SAM 3D's object goes into the frame's camera (its own pose, in whichever axes best cover the outline), is
+  2. complete: Muse Image (Meta Model API) redraws each thing's photo with whatever stands in front of it taken away
+     and its hidden parts filled in (the owner's rule 1, in the photo), and SAM 3.1 outlines it there again. Only the
+     model that can't see past things (TRELLIS) builds from these; SAM 3D takes the real photo, since it was made to.
+  3. build: SAM 3D Objects builds every outlined thing of a frame from that frame, one call per frame, on this PC's own
+     card (8 GB, one model part on it at a time), on Modal or on fal.ai; or Microsoft's TRELLIS builds each thing from
+     its completed photo while Meta's SAM 3D weights wait for approval.
+  4. place: SAM 3D's object goes into the frame's camera (its own pose, in whichever axes best cover the outline), is
      scaled about the camera until it sits on the measured points (scaling about the camera keeps it on the outline),
      and is then fitted to them (ICP). Things standing on the floor go down onto it.
-  4. The sides the photo saw are painted from the full-size photo itself, where the real surface agrees; SAM 3D's own
+  5. The sides the photo saw are painted from the full-size photo itself, where the real surface agrees; SAM 3D's own
      colours stay only where the photo didn't see, matched to the photo's exposure, and each vertex records which.
 Things built into the walls (windows, doors, curtains, outlets, heaters) stay part of the walls' photos.
 
 Needs the request folder's frames/ (the video's full-size frames), splat-data/ (frames and cameras), room-surface.ply,
 room-frame.json and room-shell.json; MODEL_API_KEY for pick and FAL_KEY for build (both in .env).
     python worker/rebuild_things.py pick <request folder>    Muse Spark + SAM 3.1: a few cents
-    python worker/rebuild_things.py build <request folder>   SAM 3D on fal.ai: $0.02 a call, one call per frame
+    python worker/rebuild_things.py complete <request folder>  Muse Image + SAM 3.1: about 2 cents a thing
+    python worker/rebuild_things.py build <request folder> [--runner local|trellis|modal|fal]
     python worker/rebuild_things.py place <request folder>
 Writes things/ (picks.json, and per thing its outline, measured points and SAM 3D's files), room-thing-<slug>.ply per
 thing and room-things.json for the viewer.
@@ -57,6 +62,22 @@ SEED = 42
 FIT_SIZE = 480  # pixels: the long side of the picture the outline fit is checked on
 FAILED_FIT = 0.35  # an object covering its outline less well than this (IoU) didn't build: the grey box stands in
 ON_FLOOR = 0.15  # metres: a thing whose bottom ends up this close to the floor stands on it
+IN_FRONT = 0.10  # metres: room surface this much nearer than a thing's measured points hides it in the photo
+BIG_THING = 0.75  # metres: a footprint this long never fits whole in one frame, so the thing is measured from several
+# Furniture that's big whatever one frame shows of it (a desk seen from close up shows half a metre of itself)
+BIG_NAMES = re.compile(r"^(bed|desk|wardrobe|closet|dresser|table|sofa|couch|bookshelf|bookcase|cabinet|shelving|"
+                       r"shelf|bench|armchair)$")
+# Bedding is part of the bed: the bed's own photo shows it, so it's measured into the bed's box and not built alone
+BEDDING = re.compile(r"^(blanket|pillow|sheet|duvet|comforter|quilt|bedspread|mattress)$")
+ON_TOP = 0.15  # metres: a thing whose bottom is this close above a big thing's measured top (or higher) sits on it
+
+
+def _head(name):
+    """A name's head noun, the word that says what the thing is: "desk chair" -> "chair"."""
+    return name.split()[-1] if name.split() else name
+MOST_VIEWS = 8  # frames a big thing is measured from: its own and the sharpest others it shows in
+NEAR = 0.6  # metres: in another frame, the outline whose points sit this close to the thing's is the same thing
+MOST_STRETCH = 2.0  # a built object is stretched into its measured box at most this much more one way than another
 SEEN_HIDDEN = 0.01  # metres: a vertex further than this behind the object's own surface is hidden from the photo
 SEEN_FACING = 0.26  # cos 75 degrees: surface turned further from the photo than this isn't painted from it
 TRUTH = 0.05  # metres: the photo paints a vertex only where the real surface it sees there is this close
@@ -391,13 +412,82 @@ def _pointmap(out, camera):
     return np.stack([-x, -y, depth], -1).reshape(height, width, 3).astype(np.float16)
 
 
+COMPLETE = (
+    "Remove everything that stands in front of the {name} and blocks part of it, and show the whole {name}, including "
+    "the parts that were hidden, as they really look. Keep the {name}'s position, size, shape, colours and details, the "
+    "rest of the room and the camera's viewpoint exactly the same. A real photo, not a drawing.")
+
+
+def _complete_one(photo, name, key):
+    """One Muse Image edit (Meta Model API, images/edits): the photo with the thing made whole. Returns PNG bytes."""
+    import requests
+
+    height, width = photo.shape[:2]
+    import cv2
+
+    response = requests.post("https://api.meta.ai/v1/images/edits", headers={"Authorization": f"Bearer {key}"},
+                             data={"model": "muse-image-1.0", "prompt": COMPLETE.format(name=name), "n": "1",
+                                   "size": f"{width}x{height}"},
+                             files={"image": ("photo.png", cv2.imencode(".png", photo)[1].tobytes(), "image/png")},
+                             timeout=300)
+    response.raise_for_status()
+    return base64.b64decode(response.json()["data"][0]["b64_json"])
+
+
+def complete(out, only=None):
+    """Step 2: each thing's photo made whole by Muse Image, and its outline there by SAM 3.1 (the outline whose box best
+    matches its outline in the real photo, scaled to the new picture). Kept in things/<slug>/completed.png and
+    completed-outline.png; things done already are skipped."""
+    import cv2
+    from concurrent.futures import ThreadPoolExecutor
+
+    out = Path(out)
+    load_env()
+    key = os.environ.get("MODEL_API_KEY")
+    if not key:
+        raise RuntimeError("MODEL_API_KEY isn't set: put it in .env")
+    folder = out / "things"
+    things = json.loads((folder / "things.json").read_text())["things"]
+    if only:
+        things = [t for t in things if t["slug"] in only]
+
+    def one(thing):
+        own = folder / thing["slug"]
+        if (own / "completed-outline.png").exists():
+            return {"thing": thing["slug"], "done": "before"}
+        try:
+            photo = cv2.imread(str(folder / "photos" / f"{Path(thing['frame']).stem}.png"))
+            (own / "completed.png").write_bytes(_complete_one(photo, thing["name"], key))
+            edited = cv2.imread(str(own / "completed.png"))
+            height, width = edited.shape[:2]
+            masks = [_mask(r, height, width) for r in _records(_outline(own / "completed.png", thing["name"], key))]
+            masks = [m for m in masks if m.sum() > 200]
+            if not masks:
+                return {"thing": thing["slug"], "error": "SAM 3.1 didn't outline it in the completed photo"}
+            original = cv2.imread(str(own / "outline.png"), cv2.IMREAD_GRAYSCALE) > 127
+            rows, cols = np.nonzero(original)
+            sy, sx = height / original.shape[0], width / original.shape[1]
+            box = [cols.min() * sx, rows.min() * sy, (cols.max() + 1) * sx, (rows.max() + 1) * sy]
+            chosen = max(masks, key=lambda m: (_box_overlap(m, box), m.sum()))
+            cv2.imwrite(str(own / "completed-outline.png"), chosen.astype(np.uint8) * 255)
+            return {"thing": thing["slug"], "done": "now", "outlinePixels": int(chosen.sum())}
+        except Exception as error:
+            return {"thing": thing["slug"], "error": f"{type(error).__name__}: {error}"[:300]}
+
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        done = list(pool.map(one, things))
+    return {"things": done, "seconds": round(time.perf_counter() - started, 1)}
+
+
 def build(out, only=None, runner="local"):
     """Step 2: SAM 3D Objects, one call per frame with every outline picked in it. `runner` "local" runs Meta's model
     on this PC's own card (worker/sam3d_local.py in WSL: free, one model part on the card at a time), "modal" on a
     Modal GPU (worker/sam3d_modal.py: credits, but Modal wants a card on file); both get HF_TOKEN for the gated weights
     and the room's own depth, so each object comes back in the frame's camera in metres. "fal" uses fal.ai's hosted
-    copy (paid, FAL_KEY). Files are kept, so building again only does frames that have none yet. `only`: some
-    things' slugs, to build just their frames (a first check)."""
+    copy (paid, FAL_KEY). "trellis" runs Microsoft's TRELLIS on this PC instead (open weights, no approval needed,
+    but no pose: place() fits its objects by their outlines). Files are kept, so building again only does frames that
+    have none yet. `only`: some things' slugs, to build just their frames (a first check)."""
     out = Path(out)
     load_env()
     folder = out / "things"
@@ -410,6 +500,8 @@ def build(out, only=None, runner="local"):
     started = time.perf_counter()
     if runner == "local":
         done = _build_locally(out, folder, frames)
+    elif runner == "trellis":
+        done = _build_locally(out, folder, frames, script="trellis_local.py", marker="trellis")
     elif runner == "modal":
         done = _build_on_modal(out, folder, frames)
     else:
@@ -425,25 +517,31 @@ def _wsl(path):
 
 
 def _save_object(own, vertices, faces, colours, layout):
-    """SAM 3D's object, already in the frame's OpenCV camera, as sam3d.glb; its own layout kept for the record only,
-    under a name place() doesn't apply again."""
+    """A built object as sam3d.glb, and how place() should read it in sam3d-pose.json: SAM 3D's is already in the
+    frame's OpenCV camera (its own layout kept for the record only, under a name place() doesn't apply again);
+    TRELLIS's is in its own axes ({"canonical": "z-up"}) and gets fitted."""
     import trimesh
 
     trimesh.Trimesh(vertices, faces, vertex_colors=colours, process=False).export(own / "sam3d.glb")
-    (own / "sam3d-pose.json").write_text(json.dumps({"inCamera": "opencv", "samLayout": layout}, indent=2))
+    pose = {"canonical": layout["canonical"]} if "canonical" in layout else {"inCamera": "opencv", "samLayout": layout}
+    (own / "sam3d-pose.json").write_text(json.dumps(pose, indent=2))
 
 
-def _build_locally(out, folder, frames):
-    """Every frame's things through sam3d_local.py in WSL, one run for all of them (the model loads once)."""
+def _build_locally(out, folder, frames, script="sam3d_local.py", marker="sam3d"):
+    """Every frame's things through a WSL runner (sam3d_local.py, or trellis_local.py), one run for all of them (the
+    model loads once). `marker`: the name of each frame's done-file, so one runner's frames don't count as the
+    other's."""
     import subprocess
 
     cameras = {camera["name"]: camera for camera in _cameras(out / "splat-data")}
-    work = folder / "local"
+    work = folder / ("local" if marker == "sam3d" else f"local-{marker}")
     (work / "pointmaps").mkdir(parents=True, exist_ok=True)
+    if marker == "trellis":
+        return _build_trellis(folder, frames, work, script)
     jobs, todo = [], {}
     for name, group in frames.items():
         stem = Path(name).stem
-        if (folder / f"sam3d-{stem}.json").exists():
+        if (folder / f"{marker}-{stem}.json").exists():
             continue
         pointmap = work / "pointmaps" / f"{stem}.npz"
         if not pointmap.exists():
@@ -455,7 +553,7 @@ def _build_locally(out, folder, frames):
     if jobs:
         (work / "jobs.json").write_text(json.dumps({"jobs": jobs, "seed": SEED}, indent=2))
         command = ('export MAMBA_ROOT_PREFIX=~/sam3d/mamba && eval "$(~/sam3d/bin/micromamba shell hook -s bash)" && '
-                   f"micromamba activate sam3d && python {_wsl(Path(__file__).parent / 'sam3d_local.py')} "
+                   f"micromamba activate sam3d && python {_wsl(Path(__file__).parent / script)} "
                    f"{_wsl(work / 'jobs.json')}")
         subprocess.run(["wsl.exe", "-e", "bash", "-lc", command], check=False)
     done = []
@@ -476,8 +574,64 @@ def _build_locally(out, folder, frames):
             summary.append({"thing": thing["slug"], "vertices": result["vertices"], "seconds": result["seconds"],
                             "peakGb": result["peakGb"]})
         if all("error" not in item for item in summary):
-            (folder / f"sam3d-{stem}.json").write_text(json.dumps({"runner": "local", "things": summary}, indent=2))
+            (folder / f"{marker}-{stem}.json").write_text(json.dumps({"runner": script, "things": summary}, indent=2))
         done.append({"frame": name, "things": summary, "called": True})
+    return done
+
+
+GREW = 2.5  # a thing whose outline takes more than this times its share of the picture after Muse Image's edit was redrawn
+
+
+def _completion_kept(own, folder, thing):
+    """Whether Muse Image's completed photo still shows the same thing: its outline's share of the picture may grow
+    (the hidden part is filled in), but not by more than GREW (a small receipt redrawn as a long paper strip, a small
+    blanket spread over the whole bed)."""
+    import cv2
+
+    before = cv2.imread(str(own / "outline.png"), cv2.IMREAD_GRAYSCALE) > 127
+    after = cv2.imread(str(own / "completed-outline.png"), cv2.IMREAD_GRAYSCALE) > 127
+    return after.mean() <= GREW * max(before.mean(), 1e-9)
+
+
+def _build_trellis(folder, frames, work, script):
+    """TRELLIS, one job per thing, from Muse Image's completed photo of it when there is one (TRELLIS builds only
+    what it sees, so a chair in front of a suitcase would cut the suitcase short), else the real photo."""
+    import subprocess
+
+    jobs, todo = [], []
+    for group in frames.values():
+        for thing in group:
+            own = folder / thing["slug"]
+            if (work / thing["slug"] / "0.json").exists():
+                todo.append(thing)  # built in an earlier run: only saved again below
+                continue
+            completed = (own / "completed.png").exists() and (own / "completed-outline.png").exists()
+            if completed and not _completion_kept(own, folder, thing):
+                completed = False  # Muse Image changed the thing itself, not just what hid it: the real photo instead
+            photo = own / "completed.png" if completed else folder / "photos" / f"{Path(thing['frame']).stem}.png"
+            outline = own / "completed-outline.png" if completed else own / "outline.png"
+            jobs.append({"photo": _wsl(photo), "outlines": [_wsl(outline)], "out": _wsl(work / thing["slug"])})
+            todo.append(thing)
+    if jobs:
+        (work / "jobs.json").write_text(json.dumps({"jobs": jobs, "seed": SEED}, indent=2))
+        command = ('export MAMBA_ROOT_PREFIX=~/sam3d/mamba && eval "$(~/sam3d/bin/micromamba shell hook -s bash)" && '
+                   f"micromamba activate sam3d && python {_wsl(Path(__file__).parent / script)} "
+                   f"{_wsl(work / 'jobs.json')}")
+        subprocess.run(["wsl.exe", "-e", "bash", "-lc", command], check=False)
+    done = []
+    for thing in todo:
+        result_file = work / thing["slug"] / "0.json"
+        if not result_file.exists():
+            done.append({"thing": thing["slug"], "error": "no result (the run stopped before it)"})
+            continue
+        result = json.loads(result_file.read_text())
+        if "error" in result:
+            done.append({"thing": thing["slug"], **result})
+            continue
+        arrays = np.load(work / thing["slug"] / "0.npz")
+        _save_object(folder / thing["slug"], arrays["vertices"], arrays["faces"], arrays["colours"], result["layout"])
+        done.append({"thing": thing["slug"], "vertices": result["vertices"], "seconds": result["seconds"],
+                     "peakGb": result["peakGb"]})
     return done
 
 
@@ -607,8 +761,14 @@ def _silhouette(vertices_cam, triangles, lens, size):
     return np.isfinite(scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()).reshape(size)
 
 
-def _iou(a, b):
-    union = (a | b).sum()
+def _iou(a, b, hidden=None):
+    """How well two outlines agree (intersection over union). `hidden`: pixels where something nearer stands in front
+    of the thing, so the photo couldn't show it there: an outline reaching into them isn't counted against it (the
+    suitcase behind the chair is still a whole suitcase)."""
+    union = a | b
+    if hidden is not None:
+        union &= ~(hidden & a & ~b)
+    union = union.sum()
     return float((a & b).sum() / union) if union else 0.0
 
 
@@ -635,6 +795,60 @@ def _fit(vertices, triangles, pose, camera, outline):
             if best[1] >= GOOD_FIT:
                 return best
     return best
+
+
+def _fit_unposed(vertices, triangles, camera, outline, measured, level, lift, rests_on, real_depth):
+    """An object in its own axes (TRELLIS: z up, inside a unit cube) put into the room: stood upright, then turned
+    (every 15 degrees), sized (around the measured points' height, or their width for things off the floor) and
+    moved (its near side on the measured points, along the camera's line of sight), keeping the try whose outline from
+    the photo's camera best covers SAM 3.1's, not counting where something nearer hides it (`real_depth`: the room's
+    depth from this camera). Returns its vertices in the camera's OpenCV axes, the outline fit and what was chosen;
+    _to_measured then fits it onto the measured points."""
+    import cv2
+
+    upright = vertices @ np.array([[1.0, 0, 0], [0, 0, 1.0], [0, -1.0, 0]]).T  # its z becomes the room's up
+    low, high = upright.min(axis=0), upright.max(axis=0)
+    upright = upright - np.array([(low[0] + high[0]) / 2, low[1], (low[2] + high[2]) / 2])  # bottom centre at 0
+    eye = (FLIP @ (-camera["turn"].T @ camera["shift"])) @ level.T - lift
+    middle = np.median(measured, axis=0)
+    look = middle - eye
+    look[1] = 0.0
+    look /= max(np.linalg.norm(look), 1e-9)
+    standing = rests_on == "floor" or measured[:, 1].min() < ON_FLOOR
+    if standing:
+        size = measured[:, 1].max() / max(np.ptp(upright[:, 1]), 1e-6)
+    else:
+        size = np.ptp(measured, axis=0).max() / max(np.ptp(upright, axis=0).max(), 1e-6)
+
+    height, width = outline.shape
+    shrink = 240 / max(height, width)
+    picture = (int(round(height * shrink)), int(round(width * shrink)))
+    small = cv2.resize(outline.astype(np.uint8), (picture[1], picture[0]), interpolation=cv2.INTER_NEAREST) > 0
+    lens = camera["lens"].copy()
+    lens[:2] *= shrink
+
+    def to_camera(points):
+        return (((points + lift) @ level) @ FLIP) @ camera["turn"].T + camera["shift"]
+
+    depth = np.median(to_camera(measured)[:, 2])
+    hidden = cv2.resize(real_depth.astype(np.float32), (picture[1], picture[0]), interpolation=cv2.INTER_NEAREST) \
+        < depth - IN_FRONT
+    best = (-1.0, None, None)
+    for degrees in range(0, 360, 15):
+        angle = np.radians(degrees)
+        turn = np.array([[np.cos(angle), 0, np.sin(angle)], [0, 1, 0], [-np.sin(angle), 0, np.cos(angle)]])
+        turned = upright @ turn.T
+        for factor in (0.8, 0.9, 1.0, 1.12, 1.25):
+            placed = turned * size * factor
+            along = placed[:, [0, 2]] @ look[[0, 2]]
+            spot = middle + look * (along.max() - along.min()) / 2  # its near side on the seen face
+            spot[1] = 0.0 if standing else middle[1] - (placed[:, 1].max() + placed[:, 1].min()) / 2
+            moved = placed + spot
+            score = _iou(_silhouette(to_camera(moved), triangles, lens, picture), small, hidden)
+            if score > best[0]:
+                best = (score, moved, f"TRELLIS, turned {degrees} degrees, x{size * factor:.3f}")
+    score, moved, choice = best
+    return to_camera(moved), score, choice
 
 
 def _visible(vertices_cam, triangles, lens, size):
@@ -741,7 +955,7 @@ def _grey_box(own, rests_on):
     box = _box(np.load(measured).astype(np.float64))
     box["size"][2] = max(box["size"][2], 0.2)
     if rests_on == "floor":
-        top = box["centre"][1] + box["size"][1] / 2
+        top = max(box["centre"][1] + box["size"][1] / 2, 0.02)  # measured points below the floor: a flat thing on it
         box["centre"][1], box["size"][1] = round(top / 2, 4), round(top, 4)
     return box
 
@@ -768,6 +982,174 @@ def _write_thing_ply(path, points, colours, triangles, seen):
         f.write(faces.tobytes())
 
 
+def measure_big(out):
+    """Step 2b: furniture-sized things (BIG_THING) measured from several frames: SAM 3.1 outlines the thing in the
+    sharpest MOST_VIEWS frames Muse Spark said it's in, rays through each outline hit the fused surface, and the hits
+    near the thing's own make one cloud. Its box (along its own longest way across the floor, down to the floor when it
+    stands on it) is where place() puts the built object: the owner's greybox, with the built thing as the art on it.
+    Writes things/<slug>/box.json."""
+    import cv2
+    import open3d as o3d
+    from sklearn.cluster import DBSCAN
+
+    from room_furniture import _sharpness
+
+    out = Path(out)
+    load_env()
+    key = os.environ.get("MODEL_API_KEY")
+    folder = out / "things"
+    things = json.loads((folder / "things.json").read_text())["things"]
+    listed = json.loads((folder / "picks.json").read_text())
+    seen_in = json.loads((folder / "seen-in.json").read_text())
+    answers_file = folder / "sam-answers.json"
+    answers = json.loads(answers_file.read_text()) if answers_file.exists() else {}
+    cameras = _cameras(out / "splat-data")
+    index_of = {camera["name"]: k for k, camera in enumerate(cameras)}
+    images = out / "splat-data" / "images"
+    level, lift = _room(out)
+    scene, _, _ = _surface(out)
+    sharp = _sharpness([cv2.imread(str(images / camera["name"]))[:, :, ::-1] for camera in cameras])
+    done = []
+    bedding = [t for t in things if BEDDING.search(_head(t["name"]))]
+    for thing in things:
+        own = folder / thing["slug"]
+        measured = np.load(own / "measured.npy").astype(np.float64)
+        footprint = np.ptp(measured[:, [0, 2]], axis=0).max()
+        if BEDDING.search(_head(thing["name"])) or not (BIG_NAMES.search(_head(thing["name"])) or footprint >= BIG_THING):
+            (own / "box.json").unlink(missing_ok=True)
+            continue
+        middle = np.median(measured, axis=0)
+        frames = {index_of[thing["frame"]]}
+        for k, item in enumerate(listed):
+            if str(item.get("name", "")).strip().lower() == thing["name"]:
+                frames |= {f for f in seen_in.get(str(k), []) if isinstance(f, int) and 0 <= f < len(cameras)}
+        frames = sorted(frames, key=lambda f: -sharp[f])[:MOST_VIEWS]
+        clouds = [measured]
+        for f in frames:
+            camera = cameras[f]
+            if f"{camera['name']}|{thing['name']}" not in answers:
+                answers[f"{camera['name']}|{thing['name']}"] = _outline(images / camera["name"], thing["name"], key)
+                answers_file.write_text(json.dumps(answers))
+            height, width = int(round(2 * camera["lens"][1, 2])), int(round(2 * camera["lens"][0, 2]))
+            best = None
+            for record in _records(answers[f"{camera['name']}|{thing['name']}"]):
+                mask = _mask(record, height, width)
+                rows, cols = np.nonzero(mask[::RAY_STEP, ::RAY_STEP])
+                if len(rows) < 50:
+                    continue
+                rays = _rays(camera, cols * RAY_STEP + 0.5, rows * RAY_STEP + 0.5)
+                hits = scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()
+                ok = np.isfinite(hits)
+                points = (rays[ok, :3] + rays[ok, 3:] * hits[ok, None]) @ level.T - lift
+                if len(points) < 50:
+                    continue
+                gap = np.linalg.norm(np.median(points, axis=0) - middle)
+                if gap < NEAR and (best is None or gap < best[0]):
+                    best = (gap, points)
+            if best is not None:
+                clouds.append(best[1])
+        merged_bedding = False
+        if _head(thing["name"]) == "bed":
+            # The blankets and pillows lying on it are the bed's top: their points join its cloud
+            reach = np.vstack(clouds)
+            low, high = reach[:, [0, 2]].min(axis=0) - 0.4, reach[:, [0, 2]].max(axis=0) + 0.4
+            for other in bedding:
+                points = np.load(folder / other["slug"] / "measured.npy").astype(np.float64)
+                spot = np.median(points[:, [0, 2]], axis=0)
+                if (spot >= low).all() and (spot <= high).all():
+                    clouds.append(points)
+                    merged_bedding = True
+        cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.vstack(clouds)))
+        cloud = np.asarray(cloud.voxel_down_sample(0.01).points)
+        # Bedding can sit a little apart from the frame it lies on: a looser grouping keeps it with the bed
+        labels = DBSCAN(eps=0.15 if merged_bedding else SAME_THING, min_samples=10).fit_predict(cloud)
+        if (labels >= 0).any():
+            cloud = cloud[labels == np.bincount(labels[labels >= 0]).argmax()]
+        low, high = np.percentile(cloud, 2, axis=0), np.percentile(cloud, 98, axis=0)
+        cloud = cloud[((cloud >= low) & (cloud <= high)).all(axis=1)]
+        box = _box(cloud)
+        # Things standing on it (monitors on a desk, suitcases on a wardrobe) show where its top really is, which the
+        # video may not (a desk top under its mat and keyboard)
+        top = box["centre"][1] + box["size"][1] / 2
+        yaw = math.radians(box["yawDegrees"])
+        along = np.array([math.cos(yaw), math.sin(yaw)])
+        across = np.array([-math.sin(yaw), math.cos(yaw)])
+        resting = []
+        for other in things:
+            if other is thing or BEDDING.search(_head(other["name"])):
+                continue
+            points = np.load(folder / other["slug"] / "measured.npy").astype(np.float64)
+            offset = np.median(points[:, [0, 2]], axis=0) - np.array([box["centre"][0], box["centre"][2]])
+            inside = abs(offset @ along) < box["size"][0] / 2 and abs(offset @ across) < box["size"][2] / 2
+            bottom = np.percentile(points[:, 1], 5)
+            if inside and bottom > top - ON_TOP:
+                resting.append(bottom)
+        if resting:
+            top = max(top, float(np.median(resting)))
+            low_end = box["centre"][1] - box["size"][1] / 2
+            box["centre"][1], box["size"][1] = round((top + low_end) / 2, 4), round(top - low_end, 4)
+        if thing.get("restsOn") == "floor" or cloud[:, 1].min() < ON_FLOOR:
+            top = box["centre"][1] + box["size"][1] / 2
+            box["centre"][1], box["size"][1] = round(top / 2, 4), round(top, 4)
+        box.update({"views": len(clouds), "points": len(cloud)})
+        (own / "box.json").write_text(json.dumps(box, indent=2))
+        done.append({"thing": thing["slug"], **box})
+    return {"things": done}
+
+
+def _fit_into_box(vertices, triangles, camera, outline, box, level, lift, real_depth):
+    """A built object in its own axes (TRELLIS: z up) fitted into its measured box: stood upright, laid along the box
+    one of four ways round, stretched to the box's size (at most MOST_STRETCH more one way than another), and the way
+    round whose outline from the photo's camera best covers SAM 3.1's (not counting what's hidden) kept."""
+    import cv2
+
+    upright = vertices @ np.array([[1.0, 0, 0], [0, 0, 1.0], [0, -1.0, 0]]).T
+    flat = upright[:, [0, 2]] - upright[:, [0, 2]].mean(axis=0)
+    _, _, axes = np.linalg.svd(flat, full_matrices=False)
+    own_yaw = math.atan2(axes[0][1], axes[0][0])
+    turn_back = np.array([[math.cos(-own_yaw), -math.sin(-own_yaw)], [math.sin(-own_yaw), math.cos(-own_yaw)]])
+    upright[:, [0, 2]] = flat @ turn_back.T  # its longest way along x
+    low, high = upright.min(axis=0), upright.max(axis=0)
+    upright -= np.array([(low[0] + high[0]) / 2, low[1], (low[2] + high[2]) / 2])
+    along, tall, across = box["size"]
+    yaw = math.radians(box["yawDegrees"])
+    room_turn = np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]])
+    bottom = box["centre"][1] - tall / 2
+
+    height, width = outline.shape
+    shrink = 240 / max(height, width)
+    picture = (int(round(height * shrink)), int(round(width * shrink)))
+    small = cv2.resize(outline.astype(np.uint8), (picture[1], picture[0]), interpolation=cv2.INTER_NEAREST) > 0
+    lens = camera["lens"].copy()
+    lens[:2] *= shrink
+
+    def to_camera(points):
+        return (((points + lift) @ level) @ FLIP) @ camera["turn"].T + camera["shift"]
+
+    best = (-1.0, None, None)
+    for quarter in range(4):
+        angle = quarter * math.pi / 2
+        spin = np.array([[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]])
+        shape = upright.copy()
+        shape[:, [0, 2]] = upright[:, [0, 2]] @ spin.T
+        extent = np.maximum(np.ptp(shape, axis=0), 1e-6)
+        stretch = np.array([along, tall, across]) / extent
+        mean = np.exp(np.log(stretch).mean())
+        stretch = np.clip(stretch, mean / math.sqrt(MOST_STRETCH), mean * math.sqrt(MOST_STRETCH))
+        placed = shape * stretch
+        placed[:, [0, 2]] = placed[:, [0, 2]] @ room_turn.T
+        placed += np.array([box["centre"][0], bottom - placed[:, 1].min(), box["centre"][2]])
+        in_camera = to_camera(placed)
+        depth = np.median(in_camera[:, 2])
+        hidden = cv2.resize(real_depth.astype(np.float32), (picture[1], picture[0]),
+                            interpolation=cv2.INTER_NEAREST) < depth - IN_FRONT
+        score = _iou(_silhouette(in_camera, triangles, lens, picture), small, hidden)
+        if score > best[0]:
+            best = (score, in_camera, f"into its measured box, {quarter * 90} degrees round, stretched "
+                                      f"{' x '.join(f'{v:.2f}' for v in stretch)}")
+    return best[1], best[0], best[2]
+
+
 def place(out):
     """Steps 3 and 4: every built thing in the room at its measured spot and size, its seen sides painted from the
     photo. Writes room-thing-<slug>.ply and room-things.json."""
@@ -781,8 +1163,11 @@ def place(out):
     level, lift = _room(out)
     scene, _, _ = _surface(out)
     placed, failed, merged = [], [], []
+    has_bed = any(_head(t["name"]) == "bed" for t in things)
     for thing in things:
         own = folder / thing["slug"]
+        if has_bed and BEDDING.search(_head(thing["name"])):
+            continue  # part of the bed (its photo shows it, and its points are in the bed's box)
         if not (own / "sam3d.glb").exists():
             failed.append({"name": thing["name"], "slug": thing["slug"], "why": "not built yet"})
             continue
@@ -791,22 +1176,36 @@ def place(out):
         pose_file = own / "sam3d-pose.json"
         pose = json.loads(pose_file.read_text()) if pose_file.exists() else None
         vertices, triangles, colours = _load_object(own)
-        in_camera, coverage, choice = _fit(vertices, triangles, pose, camera, outline)
-        if in_camera is None or coverage < FAILED_FIT:
-            failed.append({"name": thing["name"], "slug": thing["slug"], "why": f"outline fit {coverage:.2f}",
-                           "fit": choice, "box": _grey_box(own, thing.get("restsOn"))})
-            continue
-        # The measured points in the camera's OpenCV axes
+        # The measured points, upright and in the camera's OpenCV axes
         measured = np.load(own / "measured.npy").astype(np.float64)
         measured_cv = (measured + lift) @ level @ FLIP  # upright -> three.js axes -> OpenCV (FLIP is its own inverse)
         measured_cam = measured_cv @ camera["turn"].T + camera["shift"]
-        moved, gap, ratio = _to_measured(in_camera, triangles, camera, measured_cam)
-
-        # Paint from the full-size photo, where the real surface (its depth, from the same camera) agrees
+        # The room's own depth from this camera: what hides the thing (for the fit) and what the photo really shows
         height, width = outline.shape
         rows, cols = np.mgrid[0:height, 0:width]
         real = scene.cast_rays(o3d.core.Tensor(_rays(camera, cols.ravel() + 0.5, rows.ravel() + 0.5)))["t_hit"].numpy()
         real_depth = np.where(np.isfinite(real), real, 1e3).reshape(height, width)
+        boxed = pose and pose.get("canonical") and (own / "box.json").exists()
+        if boxed:
+            box = json.loads((own / "box.json").read_text())
+            in_camera, coverage, choice = _fit_into_box(vertices, triangles, camera, outline, box, level, lift,
+                                                        real_depth)
+        elif pose and pose.get("canonical"):
+            in_camera, coverage, choice = _fit_unposed(vertices, triangles, camera, outline, measured, level, lift,
+                                                       thing.get("restsOn"), real_depth)
+        else:
+            in_camera, coverage, choice = _fit(vertices, triangles, pose, camera, outline)
+        # A big thing in its measured box stays even with a poor outline fit: its size and spot are measured
+        if in_camera is None or (coverage < FAILED_FIT and not boxed):
+            failed.append({"name": thing["name"], "slug": thing["slug"], "why": f"outline fit {coverage:.2f}",
+                           "fit": choice, "box": _grey_box(own, thing.get("restsOn"))})
+            continue
+        if boxed:
+            moved, gap, ratio = in_camera, float("nan"), 1.0  # the box already sets its size and spot
+        else:
+            moved, gap, ratio = _to_measured(in_camera, triangles, camera, measured_cam)
+
+        # Paint from the full-size photo, where the real surface (its depth, from the same camera) agrees
         photo = cv2.imread(str(folder / "photos" / f"{Path(thing['frame']).stem}-full.jpg"))
         painted_colours, painted = _paint(moved, triangles, colours, camera, outline, photo, real_depth)
 
@@ -822,7 +1221,8 @@ def place(out):
         placed.append({
             "name": thing["name"], "slug": thing["slug"], "file": f"room-thing-{thing['slug']}.ply", **_box(upright),
             "seenShare": round(float(painted.mean()), 3), "screen": thing["screen"], "moving": thing["moving"],
-            "outlineFit": round(coverage, 3), "fit": choice, "scaledBy": round(ratio, 4), "measuredGapCm": round(100 * gap, 1),
+            "outlineFit": round(coverage, 3), "fit": choice, "scaledBy": round(ratio, 4),
+            "measuredGapCm": None if math.isnan(gap) else round(100 * gap, 1),
         })
     summary = {"things": placed, "failed": failed}
     (out / "room-things.json").write_text(json.dumps(summary, indent=2))
@@ -836,10 +1236,10 @@ def place(out):
 
 
 if __name__ == "__main__":
-    steps = {"pick": pick, "build": build, "place": place}
+    steps = {"pick": pick, "complete": complete, "measure-big": measure_big, "build": build, "place": place}
     if len(sys.argv) < 3 or sys.argv[1] not in steps:
-        sys.exit("usage: python worker/rebuild_things.py pick|build|place <request folder> "
-                 "[build: thing slugs] [--runner local|modal|fal]")
+        sys.exit("usage: python worker/rebuild_things.py pick|complete|build|place <request folder> "
+                 "[build: thing slugs] [--runner local|trellis|modal|fal]")
     if sys.argv[1] == "build":
         extra = sys.argv[3:]
         runner = "local"

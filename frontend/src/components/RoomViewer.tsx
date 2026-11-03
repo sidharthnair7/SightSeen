@@ -3,9 +3,11 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js'
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark'
-import { Eye, Hand, Ruler, RotateCcw, X } from 'lucide-react'
+import { Camera, Eye, Hand, Ruler, RotateCcw, X } from 'lucide-react'
 import { SHELL_FACES, type RoomShell } from './walk/types'
 import { texturedShellMaterials } from './walk/shellTextures'
+import { materialShellMaterials } from './walk/shellMaterials'
+import { loadDecals } from './walk/decals'
 import { loadFurniture } from './walk/furniture'
 import { movableThings, type Movable } from './walk/moveThings'
 import { loadRebuilt } from './walk/rebuilt'
@@ -81,6 +83,9 @@ export default function RoomViewer({ url }: { url: string }) {
   const moveOn = useRef(false)
   const surfaceMesh = useRef<THREE.Mesh | null>(null)
   const shellMesh = useRef<THREE.Mesh | null>(null)
+  const photoShell = useRef<THREE.Material[] | null>(null) // the walls as filmed (or flat colours until they load)
+  const materialShell = useRef<THREE.Material[] | null>(null) // the Rebuilt look's clean materials
+  const wallDecals = useRef<THREE.Group | null>(null) // and the window, door and the rest cut out onto them
   const blocks = useRef<THREE.Group | null>(null)
   const rebuiltGroup = useRef<THREE.Group | null>(null) // the Rebuilt look's things, whole on every side
   const rebuiltMovable = useRef<Movable | null>(null)
@@ -100,6 +105,9 @@ export default function RoomViewer({ url }: { url: string }) {
   const [hasMovable, setHasMovable] = useState(false)
   const [hasRebuilt, setHasRebuilt] = useState(false)
   const [notFilmed, setNotFilmed] = useState(false) // the Rebuilt look's never-filmed parts tinted
+  const [hasMaterials, setHasMaterials] = useState(false)
+  const [hasDecals, setHasDecals] = useState(false)
+  const [photoWalls, setPhotoWalls] = useState(false) // the Rebuilt look showing the filmed walls instead
   const [moving, setMoving] = useState(false)
   const [held, setHeld] = useState<string | null>(null)
   const showing = pick(look, hasSplats, hasSurface, hasWalk, hasRebuilt)
@@ -109,6 +117,17 @@ export default function RoomViewer({ url }: { url: string }) {
   useEffect(() => {
     if (material.current) material.current.size = baseSize.current * dots
   }, [dots, state])
+
+  // The Rebuilt look wears the clean materials, unless "Photo walls" is on; every other look wears the filmed walls
+  // (with the window, door and the rest cut out onto them)
+  useEffect(() => {
+    const clean = showing === 'rebuilt' && !photoWalls && !!materialShell.current
+    if (wallDecals.current) wallDecals.current.visible = clean
+    const shell = shellMesh.current
+    if (!shell) return
+    const wanted = clean ? materialShell.current : photoShell.current
+    if (wanted) shell.material = wanted
+  }, [showing, photoWalls, hasMaterials, hasDecals, state])
 
   useEffect(() => {
     shown.current = showing
@@ -142,6 +161,9 @@ export default function RoomViewer({ url }: { url: string }) {
     setHasWalk(false)
     setHasRebuilt(false)
     setNotFilmed(false)
+    setHasMaterials(false)
+    setHasDecals(false)
+    setPhotoWalls(false)
 
     const { renderer, spark } = sharedRenderer()
     renderer.setSize(el.clientWidth, el.clientHeight)
@@ -253,10 +275,30 @@ export default function RoomViewer({ url }: { url: string }) {
         )
         // The real walls (photos from the frames) replace the flat colours when this room has them
         const walls = shell
+        photoShell.current = walls.material as THREE.Material[]
         texturedShellMaterials(assets, found).then(materials => {
           if (disposed || !materials) return
-          ;(walls.material as THREE.Material[]).forEach(m => m.dispose())
-          walls.material = materials
+          const flat = photoShell.current
+          photoShell.current = materials
+          if (walls.material === flat) walls.material = materials
+          flat?.forEach(m => m.dispose())
+        }, () => {})
+        // The clean materials for the Rebuilt look, when this room has them
+        materialShellMaterials(assets, found).then(materials => {
+          if (disposed || !materials) return
+          materialShell.current = materials
+          setHasMaterials(true)
+        }, () => {})
+        loadDecals(assets).then(decals => {
+          if (!decals) return
+          if (disposed) {
+            disposeTree(decals)
+            return
+          }
+          decals.visible = false
+          wallDecals.current = decals
+          scene.add(decals)
+          setHasDecals(true)
         }, () => {})
         shell.position.set(found.centre[0], found.centre[1], found.centre[2])
         shell.rotation.y = -THREE.MathUtils.degToRad(found.yawDegrees)
@@ -477,8 +519,16 @@ export default function RoomViewer({ url }: { url: string }) {
       surfaceMesh.current = null
       if (shell) {
         shell.geometry.dispose()
-        ;(shell.material as THREE.Material[]).forEach(m => m.dispose())
+        photoShell.current?.forEach(m => m.dispose())
+        materialShell.current?.forEach(m => m.dispose())
       }
+      photoShell.current = null
+      materialShell.current = null
+      if (wallDecals.current) {
+        scene.remove(wallDecals.current)
+        disposeTree(wallDecals.current)
+      }
+      wallDecals.current = null
       shellMesh.current = null
       things?.traverse(part => {
         if (part instanceof THREE.Mesh || part instanceof THREE.LineSegments) {
@@ -537,6 +587,15 @@ export default function RoomViewer({ url }: { url: string }) {
       </p>
       {state === 'ready' && (
         <div className="absolute bottom-3 right-3 flex items-center gap-2">
+          {hasRebuilt && showing === 'rebuilt' && hasMaterials && (
+            <button
+              type="button"
+              onClick={() => setPhotoWalls(!photoWalls)}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs ${photoWalls ? 'bg-sky-500 text-white' : 'bg-black/60 text-white hover:bg-black/80'}`}
+            >
+              <Camera size={14} /> Photo walls
+            </button>
+          )}
           {hasRebuilt && showing === 'rebuilt' && (
             <button
               type="button"
@@ -608,4 +667,14 @@ export default function RoomViewer({ url }: { url: string }) {
       )}
     </div>
   )
+}
+
+/** Frees every mesh's geometry and material under `root`. */
+function disposeTree(root: THREE.Object3D) {
+  root.traverse(part => {
+    if (part instanceof THREE.Mesh) {
+      part.geometry.dispose()
+      ;(part.material as THREE.Material).dispose()
+    }
+  })
 }

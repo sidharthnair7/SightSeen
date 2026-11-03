@@ -73,6 +73,16 @@ COLMAP_MAX_SIDE = 1024  # COLMAP finds features on a copy at most this big, so a
 ADD_BACK = os.environ.get("SIGHTSEEN_ADD_BACK", "1") != "0"
 ADD_BACK_NEIGHBOURS = 8  # placed frames nearest in the video, used to line each one up
 ADD_BACK_MAX_GAP = 0.15  # metres: neighbours lining up worse than this means MapAnything's camera can't be trusted
+SNAP_BACK = os.environ.get("SIGHTSEEN_SNAP_BACK", "0") != "0"  # off until it's proven on more than take 4
+SNAP_REACH = (0.30, 0.12, 0.05)  # metres: how far ICP looks for a frame's matching points, coarse to fine
+SNAP_VOXEL = 0.03  # metres between the points ICP uses
+SNAP_NEAR = 0.04  # metres: a point this close to the placed frames' surface lies on it
+SNAP_GAIN = 0.03  # a snap is kept when that share of the frame's points grows by this much
+SNAP_MOVE = 1.0  # metres and degrees: a snap moving the camera further than this is a wrong match, not a fix
+SNAP_TURN = 20.0  # (30 degrees let two of take 4's frames snap onto the wrong surfaces, and the frames snapped onto
+# them after followed: the walls behind them went missing)
+SNAP_LEAVE = 0.3  # a frame that can't be snapped, with less than this on the placed surface, is left out: its camera
+# is wrong and its view would only add a second copy of what it saw
 FLAT_DEGREES = 15  # surface facing within this many degrees of up or down counts as flat (floor, bed, desk, ceiling)
 # A fitted patch must face within this of up to count: on take 3 the real floor, bed and ceiling sat 1.2 to 2.4 degrees
 # off the cameras' up, and the noisy bits of floor 10 to 13
@@ -493,8 +503,10 @@ def _use_colmap(room, model, frames):
                               (rows - lens[1, 2]) / lens[1, 1] * f["depth"], f["depth"]], axis=-1)
         f["pts"] = (in_camera @ camera_to_room[:3, :3].T + camera_to_room[:3, 3]).astype(np.float32)
         f["pose"], f["lens"] = camera_to_room, lens
+    snapped = _snap_back(room, sorted(placed), sorted(back)) if SNAP_BACK and back else {}
     fixes = np.array([metres / ratio for ratio in ratios.values()])
     return {"used": "colmap", "framesPlaced": len(placed), "framesAddedBack": len(back), "framesLeftOut": len(left_out),
+            "snapped": snapped,
             "errorPx": round(model.compute_mean_reprojection_error(), 3), "points": model.num_points3D(),
             "metresPerUnit": round(metres, 4),
             "depthFix": [round(float(np.percentile(fixes, 10)), 3), round(float(np.percentile(fixes, 90)), 3)]}
@@ -525,6 +537,58 @@ def _add_back(room, changes, unplaced):
         camera_to_room[:3, 3] = resize * turn @ room[i]["pose"][:3, 3] + move
         back[i] = (camera_to_room, changes[nearest[0]][1], resize)
     return back
+
+
+def _snap_back(room, placed, back):
+    """An added-back frame's camera is MapAnything's, lined up only by where the nearest placed frames' cameras are, so
+    after a fast turn or a blank wall its view can land 0.3-0.7 m off (take 4: the desk close-ups, the bed's corner, the
+    door and the wardrobe; the fused room held two desks and two beds). Each one is snapped onto the placed frames'
+    own points: ICP, point to plane, reaching from 30 cm down to 5 cm, kept only when more of its points then lie on
+    the placed frames' surface and the camera moved a believable amount. The frame overlapping the reference most goes
+    first, and every frame joins the reference once done, so a frame that only sees what another added-back frame saw
+    (the wardrobe, after the corner by it) snaps onto that one. A frame that can't be snapped (a wrong match: too far,
+    too much turn) and lies mostly off the placed surface is marked "leftOut": it adds nothing to the fused room, since
+    its view would only add a second copy of what it saw (it keeps its camera and its number, which later steps use).
+    Moves each snapped frame's camera and points in place; returns frame number -> what happened."""
+    import open3d as o3d
+
+    registration = o3d.pipelines.registration
+
+    def cloud(frames, normals=False):
+        points = np.concatenate([room[i]["pts"][room[i]["trusted"]] for i in frames]).astype(np.float64)
+        found = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points)).voxel_down_sample(SNAP_VOXEL)
+        if normals:
+            found.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=4 * SNAP_VOXEL, max_nn=30))
+        return found
+
+    reference, done, todo, report = cloud(placed, normals=True), list(placed), list(back), {}
+    while todo:
+        sources = {i: cloud([i]) for i in todo}
+        before = {i: registration.evaluate_registration(sources[i], reference, SNAP_NEAR).fitness for i in todo}
+        i = max(todo, key=lambda k: before[k])
+        todo.remove(i)
+        change = np.eye(4)
+        for reach in SNAP_REACH:
+            change = registration.registration_icp(sources[i], reference, reach, change,
+                                                   registration.TransformationEstimationPointToPlane()).transformation
+        after = registration.evaluate_registration(sources[i], reference, SNAP_NEAR, change).fitness
+        camera = room[i]["pose"][:3, 3].astype(np.float64)
+        moved = float(np.linalg.norm(change[:3, :3] @ camera + change[:3, 3] - camera))
+        turned = float(np.degrees(np.arccos(np.clip((np.trace(change[:3, :3]) - 1) / 2, -1.0, 1.0))))
+        kept = after >= before[i] + SNAP_GAIN and moved <= SNAP_MOVE and turned <= SNAP_TURN
+        if kept:
+            f = room[i]
+            f["pts"] = (f["pts"] @ change[:3, :3].T.astype(np.float32) + change[:3, 3].astype(np.float32))
+            f["pose"] = (change @ f["pose"].astype(np.float64)).astype(np.float32)
+        left_out = not kept and before[i] < SNAP_LEAVE
+        report[i] = {"on": round(before[i], 3), "onAfter": round(after, 3), "movedCm": round(100 * moved, 1),
+                     "turnedDeg": round(turned, 1), "kept": bool(kept), "leftOut": bool(left_out)}
+        if left_out:
+            room[i]["leftOut"] = True
+            continue
+        done.append(i)
+        reference = cloud(done, normals=True)
+    return report
 
 
 def _write_splat_data(room, points, colours, folder, frames):
@@ -905,17 +969,18 @@ def run(video_path, output_dir, model_key, fps, frames_per_part, stage):
         cameras["seconds"] = round(time.perf_counter() - started, 1)
 
     stage("making the solid surface")
+    fused = {i: f for i, f in room.items() if not f.get("leftOut")}  # frames whose cameras couldn't be trusted add nothing
     try:
-        triangles = _fuse(room, out / "room-surface.ply")
+        triangles = _fuse(fused, out / "room-surface.ply")
         surface, surface_error = "room-surface.ply", None
     except Exception as error:  # noqa: BLE001 - the dots still work, so a failed surface doesn't fail the room
         traceback.print_exc()
         triangles, surface, surface_error = 0, None, f"{type(error).__name__}: {error}"
 
     stage("saving the room")
-    points = np.concatenate([f["pts"][f["valid"]] for f in room.values()])
-    colours = np.concatenate([f["rgb"][f["valid"]] for f in room.values()])
-    confidence = np.concatenate([f["conf"][f["valid"]] for f in room.values()])
+    points = np.concatenate([f["pts"][f["valid"]] for f in fused.values()])
+    colours = np.concatenate([f["rgb"][f["valid"]] for f in fused.values()])
+    confidence = np.concatenate([f["conf"][f["valid"]] for f in fused.values()])
     keep = confidence >= np.percentile(confidence, 10)  # drop the least confident tenth, as MapAnything's own mask does
     points, colours, confidence = points[keep], colours[keep], confidence[keep]
     points, colours = _thin(points, colours, confidence, DOT)
