@@ -94,8 +94,8 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
       view.hx += (view.hxTo - view.hx) * 0.06
       view.hy += (view.hyTo - view.hy) * 0.06
       view.near += (view.nearTo - view.near) * 0.05
-      const sway = still ? 0 : Math.sin(now / 1000 * 0.16) * 0.42 * (1 - view.near)
-      const yaw = THREE.MathUtils.degToRad(318) + sway + view.drag + view.hx * 0.6
+      const sway = still ? 0 : Math.sin(now / 1000 * 0.16) * 0.12 * (1 - view.near)
+      const yaw = THREE.MathUtils.degToRad(318) + sway + view.drag + view.hx * 0.18
       const pitch = THREE.MathUtils.degToRad(31) + view.hy * 0.14
       camera.position.set(
         target.x + radius * Math.sin(yaw) * Math.cos(pitch),
@@ -148,7 +148,7 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
         view.nearTo = 1
       }
       if (view.down) {
-        view.dragTo = THREE.MathUtils.clamp(view.dragTo - (event.clientX - view.lastX) * 0.006, -1.1, 1.1)
+        view.dragTo = THREE.MathUtils.clamp(view.dragTo - (event.clientX - view.lastX) * 0.006, -0.25, 0.25)
         view.lastX = event.clientX
       }
       wake()
