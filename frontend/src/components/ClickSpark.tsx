@@ -1,3 +1,4 @@
+// From React Bits (reactbits.dev), adapted for SightSeen. MIT + Commons Clause: see REACT-BITS-LICENSE.md in this folder.
 'use client';
 
 import { forwardRef, useEffect, useImperativeHandle, useRef, type CSSProperties, type ReactNode } from 'react';

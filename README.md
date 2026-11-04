@@ -195,4 +195,7 @@ sample's example ads and the landing page's picture were made with Muse Image. N
 
 ## Licence
 
-To be chosen before submission.
+SightSeen's own code is under the [MIT License](LICENSE). The four React Bits components keep their own licence (MIT +
+Commons Clause, in [`frontend/src/components/REACT-BITS-LICENSE.md`](frontend/src/components/REACT-BITS-LICENSE.md)). The
+models and tools it uses keep theirs: MapAnything's checkpoint (Apache 2.0), SAM 3D Objects (SAM License), Brush (Apache
+2.0), Spark (MIT) and COLMAP (BSD).
