@@ -4,7 +4,7 @@
 size that a student can walk, measure, fill with their own things, step into in VR, and check for the signs of a rental
 scam.
 
-**[Try it live](LIVE_LINK)** · no sign-in · walk a sample room, watch it catch a fake, or start your own
+**[Try it live](https://sightseen6.pages.dev)** · no sign-in · walk a sample room, watch it catch a fake, or start your own
 
 Built for Meta's Global AI Developer Hackathon by Sidharth Nair and Trinidad Laguardia, with MapAnything, Muse Spark,
 Muse Image, SAM 3.1 and SAM 3D Objects.
