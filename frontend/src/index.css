@@ -1,13 +1,80 @@
 @import "tailwindcss";
 
 :root {
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-  color: #16202a;
-  background: #f5f7f6;
+  font-family: Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #eaf6fb;
+  background: #06131b;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
 
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: #06131b;
+}
+
 body {
+  min-width: 320px;
+  min-height: 100vh;
   margin: 0;
+  background:
+    radial-gradient(circle at 12% 20%, rgba(5, 147, 198, 0.24), transparent 28rem),
+    radial-gradient(circle at 88% 12%, rgba(216, 57, 149, 0.18), transparent 26rem),
+    radial-gradient(circle at 52% 92%, rgba(45, 190, 172, 0.12), transparent 30rem),
+    #06131b;
+}
+
+button,
+a,
+input {
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  background: rgba(5, 147, 198, 0.55);
+  color: white;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-12px); }
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.92); opacity: 0.7; }
+  100% { transform: scale(1.2); opacity: 0; }
+}
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+.animate-rise-in {
+  animation: rise-in 700ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.delay-1 {
+  animation-delay: 120ms;
+}
+
+.delay-2 {
+  animation-delay: 240ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
 }
