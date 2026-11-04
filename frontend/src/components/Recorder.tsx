@@ -176,7 +176,7 @@ export default function Recorder({ code, onSend, sending }: { code?: string; onS
               type="button"
               disabled={sending !== null}
               onClick={() => onSend(file)}
-              className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-cyan-300 via-sky-400 to-pink-400 text-slate-950 px-4 py-2 font-semibold transition-[scale,filter] duration-150 ease-out hover:brightness-105 enabled:active:scale-[0.96] motion-reduce:transition-none disabled:opacity-60"
+              className="inline-flex items-center gap-2 rounded-full bg-tape text-ink px-4 py-2 font-semibold transition-[scale,filter] duration-150 ease-out hover:brightness-105 enabled:active:scale-[0.96] motion-reduce:transition-none disabled:opacity-60"
             >
               <Send size={16} /> {sending !== null ? `Sending ${Math.round(sending * 100)}%` : 'Send this video'}
             </button>

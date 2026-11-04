@@ -16,7 +16,7 @@ const GROW = 1.6 // how much an icon grows right under the pointer
 const REACH = 100 // pixels: how far along the dock the growing reaches
 const SIZE = 40 // pixels: an icon at rest
 
-const BUTTON = 'flex h-full w-full items-center justify-center rounded-xl text-[#fdf2ed]/75 outline-none transition-colors duration-150 hover:bg-[#fdf2ed]/[0.1] hover:text-[#fdf2ed] focus-visible:ring-2 focus-visible:ring-cyan-300 disabled:pointer-events-none disabled:opacity-40 [&_svg]:size-[52%] data-[active=true]:bg-cyan-300 data-[active=true]:text-slate-950'
+const BUTTON = 'flex h-full w-full items-center justify-center rounded-xl text-[#fdf2ed]/75 outline-none transition-colors duration-150 hover:bg-[#fdf2ed]/[0.1] hover:text-[#fdf2ed] focus-visible:ring-2 focus-visible:ring-tape disabled:pointer-events-none disabled:opacity-40 [&_svg]:size-[52%] data-[active=true]:bg-tape data-[active=true]:text-ink'
 
 function Icon({ item, mouseX, onHover, still }: {
   item: DockItem
@@ -106,7 +106,7 @@ export default function Dock({ items }: { items: DockItem[] }) {
         {items.map(item => (
           <button key={item.label} type="button" onClick={item.onClick} disabled={item.disabled} aria-pressed={item.active}
             data-active={item.active ? 'true' : undefined}
-            className="flex w-[3.9rem] shrink-0 flex-col items-center gap-1 rounded-xl px-1 py-1.5 text-[9.5px] leading-tight text-[#fdf2ed]/80 outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 disabled:opacity-40 data-[active=true]:bg-cyan-300 data-[active=true]:text-slate-950 [&_svg]:size-[18px]">
+            className="flex w-[3.9rem] shrink-0 flex-col items-center gap-1 rounded-xl px-1 py-1.5 text-[9.5px] leading-tight text-[#fdf2ed]/80 outline-none focus-visible:ring-2 focus-visible:ring-tape disabled:opacity-40 data-[active=true]:bg-tape data-[active=true]:text-ink [&_svg]:size-[18px]">
             {item.icon}
             <span className="text-center">{item.label}</span>
           </button>

@@ -1,9 +1,21 @@
 @import "tailwindcss";
 
+/* SightSeen's look: a surveyor's sheet. Cool paper, survey-navy ink, tape-measure yellow for anything measured and
+   for the main action, and red kept for one thing: "Don't pay yet". Archivo throughout, run wide for headlines. */
+@theme {
+  --color-paper: #f4f6f9;
+  --color-ink: #0f1f38;
+  --color-steel: #56657a;
+  --color-hair: #d7dde6;
+  --color-tape: #ffd23f;
+  --color-alert: #e5484d;
+  --font-sans: "Archivo", "Segoe UI", system-ui, sans-serif;
+}
+
 :root {
-  font-family: Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-  color: #0f172a;
-  background: #f6f8fb;
+  font-family: "Archivo", "Segoe UI", system-ui, sans-serif;
+  color: #0f1f38;
+  background: #f4f6f9;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -13,7 +25,7 @@
 }
 
 html {
-  background: #f6f8fb;
+  background: #f4f6f9;
   scroll-behavior: smooth;
   scroll-padding-top: 5.5rem; /* the floating nav's height, so a section it jumps to isn't under it */
 }
@@ -22,12 +34,15 @@ body {
   min-width: 320px;
   min-height: 100vh;
   margin: 0;
-  background:
-    radial-gradient(circle at 8% 4%, rgba(34, 211, 238, 0.18), transparent 26rem),
-    radial-gradient(circle at 94% 8%, rgba(244, 114, 182, 0.18), transparent 28rem),
-    radial-gradient(circle at 50% 40rem, rgba(167, 139, 250, 0.1), transparent 34rem),
-    linear-gradient(160deg, #f8fbff 0%, #f6f8fb 50%, #fbf7fb 100%);
-  background-repeat: no-repeat;
+  background: #f4f6f9;
+}
+
+/* Headlines: the same family, run wide and tight */
+.font-display {
+  font-family: "Archivo", "Segoe UI", system-ui, sans-serif;
+  font-stretch: 122%;
+  font-variation-settings: "wdth" 122;
+  letter-spacing: -0.035em;
 }
 
 button,
@@ -37,13 +52,13 @@ input {
 }
 
 ::selection {
-  background: #f472b6;
-  color: white;
+  background: #ffd23f;
+  color: #0f1f38;
 }
 
 @keyframes float {
-  0%, 100% { transform: translateY(0) rotate(0deg); }
-  50% { transform: translateY(-12px) rotate(0.5deg); }
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
 }
 
 @keyframes rise-in {
@@ -125,8 +140,8 @@ button.glass-chip {
 }
 
 .glass-chip[aria-pressed="true"] {
-  color: #04101b;
-  background: #67e8f9;
+  color: #0f1f38;
+  background: #ffd23f;
   border-color: transparent;
 }
 

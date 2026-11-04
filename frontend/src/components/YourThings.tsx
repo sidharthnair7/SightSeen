@@ -315,7 +315,7 @@ export default function YourThings({ base, room, scale, open, onClose, onReady, 
             aria-label="Its longest side in centimetres" inputMode="decimal" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-xs" />
           {error && <p className="text-xs text-red-700" role="alert">{error}</p>}
           <button type="button" onClick={send} disabled={sending}
-            className={`w-full rounded-lg bg-gradient-to-r from-cyan-300 via-sky-400 to-pink-400 text-slate-950 px-3 py-2 text-xs font-semibold hover:brightness-105 disabled:opacity-50 ${PRESS}`}>
+            className={`w-full rounded-full bg-tape text-ink px-3 py-2 text-xs font-semibold hover:brightness-105 disabled:opacity-50 ${PRESS}`}>
             {sending ? 'Sending...' : 'Build it in 3D'}
           </button>
         </div>

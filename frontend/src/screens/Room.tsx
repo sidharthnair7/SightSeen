@@ -139,7 +139,7 @@ export default function Room({ id }: { id: string }) {
             <p className="mt-1">
               A student texts the landlord one link. The landlord’s phone video becomes this: a 3D room at its real size to walk,
               measure, fit your own things in, and check for red flags. This one is a real student’s room.{' '}
-              {LIVE && <a href="/workspace" className="font-medium text-sky-700 underline underline-offset-2">Try it with your own room</a>}
+              {LIVE && <a href="/workspace" className="font-medium text-ink underline decoration-tape decoration-2 underline-offset-2">Try it with your own room</a>}
             </p>
           </div>
         )}
@@ -213,7 +213,7 @@ export default function Room({ id }: { id: string }) {
 
         {building && (
           <section className="liquid-glass mt-6 flex items-center gap-3 rounded-2xl p-5">
-            <Loader2 className="shrink-0 animate-spin text-sky-600 motion-reduce:animate-none" />
+            <Loader2 className="shrink-0 animate-spin text-ink motion-reduce:animate-none" />
             <div>
               <p className="font-medium text-slate-950">Building the 3D room</p>
               <p className="text-sm text-slate-600">

@@ -1,6 +1,6 @@
-SightSeen's own code is under the MIT License below. The four React Bits components in frontend/src/components
-(PillNav, DitherVeil, ClickSpark and ShinyText) keep React Bits' own licence, in
-frontend/src/components/REACT-BITS-LICENSE.md.
+SightSeen's own code is under the MIT License below. The eleven React Bits components in frontend/src/components
+(PillNav, DitherVeil, ClickSpark, ShinyText, Threads, BlurText, RotatingText, CountUp, TiltedCard, Magnet and LogoLoop)
+keep React Bits' own licence, in frontend/src/components/REACT-BITS-LICENSE.md.
 
 MIT License
 

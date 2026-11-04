@@ -55,8 +55,8 @@ export default function Film({ token }: { token: string }) {
       </p>
 
       {view.code && (
-        <section className="mt-6 flex items-start gap-3 rounded-2xl border border-sky-300/60 bg-white p-4 shadow-sm">
-          <KeyRound className="mt-0.5 shrink-0 text-sky-600" size={20} />
+        <section className="mt-6 flex items-start gap-3 rounded-2xl border border-tape bg-white p-4 shadow-sm">
+          <KeyRound className="mt-0.5 shrink-0 text-ink" size={20} />
           <div>
             <p className="font-medium text-slate-950">Your one-time code: <span className="text-2xl font-bold tabular-nums tracking-wider">{view.code}</span></p>
             <p className="mt-1 text-sm text-slate-600">

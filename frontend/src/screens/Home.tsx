@@ -1,21 +1,18 @@
 import { useEffect, useState } from 'react'
-import {
-  ArrowRight,
-  Box,
-  FileWarning,
-  Glasses,
-  KeyRound,
-  Layers,
-  ShieldCheck,
-  ScanSearch,
-  Sparkles,
-} from 'lucide-react'
+import { AlertTriangle, Check, X } from 'lucide-react'
 import { FAKE_ROOM, STATIC_ROOM } from '../api'
+import BlurText from '../components/BlurText'
 import ClickSpark from '../components/ClickSpark'
+import CountUp from '../components/CountUp'
 import DitherVeil from '../components/DitherVeil'
-import GlBackground from '../components/GlBackground'
-import ShinyText from '../components/ShinyText'
+import LogoLoop from '../components/LogoLoop'
+import Magnet from '../components/Magnet'
+import Reveal from '../components/Reveal'
+import RoomScanHero from '../components/RoomScanHero'
+import RotatingText from '../components/RotatingText'
 import SiteNav from '../components/SiteNav'
+import Threads from '../components/Threads'
+import TiltedCard from '../components/TiltedCard'
 
 const sampleHref = STATIC_ROOM ? `/room/${STATIC_ROOM}` : null
 const fakeHref = FAKE_ROOM ? `/room/${FAKE_ROOM}` : null
@@ -28,37 +25,93 @@ const navItems = [
   { label: 'Workspace', href: '/workspace' },
 ]
 
+const MODELS = ['MapAnything', 'Muse Spark', 'Muse Image', 'SAM 3.1', 'SAM 3D Objects']
+
 const STEPS = [
-  ['01', 'Send one link', 'The landlord opens a private link and films the room in the browser, with no app and no account, holding up a one-time code as they start.'],
-  ['02', 'Build the space', 'MapAnything rebuilds the room in metres from the video. Muse Spark and SAM 3.1 find each thing in it, and SAM 3D Objects rebuilds it whole.'],
-  ['03', 'Explore before signing', 'Walk it, measure it, fit your own things by taking a picture of them, then step inside at real size on a Meta Quest.'],
+  {
+    title: 'You send the landlord one link',
+    text: 'They open it on their phone and film the room in the browser, holding up a one-time code as they start. No app, no account.',
+  },
+  {
+    title: 'The video becomes the room',
+    text: 'MapAnything rebuilds it in metres. Muse Spark and SAM 3.1 find each thing in it, and SAM 3D Objects rebuilds each one whole.',
+  },
+  {
+    title: 'You check it before you sign',
+    text: 'Walk it, measure it, fit your own desk in it, read the scam checks, and stand in it at real size on a Meta Quest.',
+  },
 ]
 
 const CHECKS = [
   {
-    icon: KeyRound,
     title: 'Filmed now, in that room',
-    text: 'Muse Spark reads every number held up in the video without being told the code. Plain code compares them. An old tour can’t have today’s code in it.',
+    text: 'Muse Spark reads every number held up in the video without being told the code. An old tour can’t have today’s code in it.',
   },
   {
-    icon: ScanSearch,
-    title: 'The room in the ad',
-    text: 'Add the ad’s photos. If their details line up with the video in 3D, it’s the same place. If not, Muse Spark names what can’t have changed: windows, doors, the floor.',
+    title: 'The same room as the ad',
+    text: 'If an ad photo’s details line up with the video in one 3D layout, it’s the same place. If not, Muse Spark names what can’t have changed.',
   },
   {
-    icon: Layers,
     title: 'Real depth',
     text: 'A “tour” panned across a photo has no depth: one flat warp explains every frame. A walk through a real room can’t look like that.',
   },
   {
-    icon: FileWarning,
     title: 'The size, and what’s missing',
-    text: 'The floor measured against the ad’s number, the walls nobody filmed, and damage only when two different views agree on it.',
+    text: 'The floor against the ad’s number, the walls nobody filmed, and damage only when two different views agree on it.',
   },
 ]
 
+// The fake room's real verdict, as its page shows it
+const VERDICT: { mark: 'fail' | 'pass' | 'warn'; text: string }[] = [
+  { mark: 'fail', text: 'The code 5645 never shows in the video' },
+  { mark: 'pass', text: 'The video moves through real 3D space' },
+  { mark: 'fail', text: 'An ad photo doesn’t look like this room' },
+  { mark: 'pass', text: 'No damage found' },
+  { mark: 'warn', text: '2 parts of the room never filmed' },
+]
+
+const NUMBERS = [
+  { to: 31.2, decimals: 1, suffix: ' dB', text: 'How sharp the 3D is on frames it never trained on, with COLMAP lining up the cameras. MapAnything’s cameras alone: 21.4.' },
+  { to: 229, decimals: 0, suffix: '', text: 'Details lining up between an ad’s photo and the video when it’s the same room. Photos of two other rooms: 11 and 12.' },
+  { to: 23, decimals: 0, suffix: ' of 23', text: 'Flat frame pairs when a “tour” is a pan across one photo. A phone walk through a real room: 0 of 20.' },
+  { to: 5, decimals: 0, suffix: ' min', text: 'Until a new room’s walls are ready to walk, on Modal’s GPUs. Its things follow in about 20.' },
+]
+
+function VerdictCard() {
+  return (
+    <div className="w-[min(25rem,calc(100vw-2.5rem))] rounded-[18px] bg-white p-5 text-left shadow-[0_1px_0_rgb(15_31_56/0.06),0_24px_60px_-20px_rgb(15_31_56/0.35)]">
+      <p className="text-sm font-semibold text-ink">Before you sign</p>
+      <div className="mt-3 rounded-xl bg-alert/10 px-4 py-3 ring-1 ring-alert/30">
+        <p className="font-display text-2xl font-[760] text-alert">Don’t pay yet</p>
+        <p className="mt-0.5 text-sm text-ink/80">At least one check failed. The details are below.</p>
+      </div>
+      <ul className="mt-4 space-y-2.5 text-[15px] text-ink">
+        {VERDICT.map(({ mark, text }) => (
+          <li key={text} className="flex items-start gap-2.5">
+            {mark === 'fail' && <X size={18} className="mt-0.5 shrink-0 text-alert" strokeWidth={2.6} />}
+            {mark === 'pass' && <Check size={18} className="mt-0.5 shrink-0 text-emerald-600" strokeWidth={2.6} />}
+            {mark === 'warn' && <AlertTriangle size={17} className="mt-0.5 shrink-0 text-amber-600" strokeWidth={2.3} />}
+            {text}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-4 border-t border-hair pt-3 text-xs leading-5 text-steel">
+        A stock video of a hotel room, passed off as the room in an ad. The verdict is the pipeline’s own.
+      </p>
+    </div>
+  )
+}
+
 export default function Home() {
   const [section, setSection] = useState('#top')
+
+  // A link to a section (/#scam-checks) lands on it: the page draws after the browser has looked for the anchor
+  useEffect(() => {
+    if (!window.location.hash) return
+    const target = document.getElementById(decodeURIComponent(window.location.hash.slice(1)))
+    const timer = setTimeout(() => target?.scrollIntoView({ behavior: 'instant' as ScrollBehavior }), 50)
+    return () => clearTimeout(timer)
+  }, [])
 
   // The nav follows the page: the section nearest the top of the view is the lit one
   useEffect(() => {
@@ -74,70 +127,63 @@ export default function Home() {
 
   return (
     <>
-      <GlBackground />
       <SiteNav items={navItems} activeHref={section} />
-      <main id="top" className="relative min-h-screen overflow-hidden px-5 pb-5 pt-20 sm:px-8 sm:pt-24">
-        <div className="relative mx-auto max-w-7xl">
-          <section className="grid min-h-[calc(100vh-7rem)] items-center gap-12 pb-16 pt-4 lg:grid-cols-[1.05fr_0.95fr] lg:pb-20">
+      <main id="top" className="relative overflow-x-clip text-ink">
+        {/* The hero: Trini's dithered room on the right, threads that lean towards the cursor behind everything */}
+        <section className="relative isolate">
+          <div aria-hidden="true" className="pointer-events-none absolute inset-0 -z-10 [mask-image:linear-gradient(to_bottom,black_55%,transparent)]">
+            <Threads color="#0f1f38" accentColor="#ffd23f" amplitude={1.4} distance={0.3} enableMouseInteraction lineCount={46}
+              thickness={0.7} softness={1.2} speed={0.45} brightness={1} opacity={0.42} angle={18} />
+          </div>
+          <div className="mx-auto grid min-h-[100svh] max-w-7xl items-center gap-12 px-5 pb-16 pt-28 sm:px-8 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
             <div className="max-w-2xl">
-              <div className="liquid-glass animate-rise-in inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-bold tracking-wide text-sky-800">
-                <Sparkles size={14} />
-                RENT WITH A CLEARER VIEW
-              </div>
-
-              <h1 className="animate-rise-in delay-1 mt-6 text-5xl font-semibold leading-[1.02] tracking-[-0.05em] text-slate-950 sm:text-6xl lg:text-7xl">
-                Don’t just view
-                <span className="block w-fit bg-gradient-to-r from-cyan-600 via-sky-600 to-pink-500 bg-clip-text pb-[0.12em] text-transparent">
-                  the listing.
-                </span>
-                <span className="-mt-[0.12em] block">Step inside it.</span>
+              <h1 className="font-display text-[clamp(2.7rem,6.1vw,5.1rem)] font-[780] leading-[0.92] text-ink">
+                <BlurText text="See the room before you sign." animateBy="words" direction="bottom" delay={90} trigger="load" />
               </h1>
-
-              <div className="animate-rise-in delay-2 mt-6 max-w-xl text-base leading-7 sm:text-lg">
-                <ShinyText color="#475569" shineColor="#0f172a" speed={3} shineWidth={55} glow={0} trigger="loop">
-                  Turn a landlord’s phone video into a 3D room at real size. Walk it, measure it, fit your own
-                  things in it, and check it isn’t a scam before you sign.
-                </ShinyText>
-              </div>
-
-              <div className="animate-rise-in delay-2 mt-9 flex flex-wrap items-center gap-3">
-                <ClickSpark sparkColor={['#22d3ee', '#f472b6', '#0ea5e9']} sparkCount={18} sparkRadius={68} sparkSize={12} sparkWidth={2} duration={650} shape="star" glow={0.4} ring className="h-auto! w-auto!">
-                  <a href="/workspace" className="inline-flex min-h-14 items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-cyan-300 via-sky-400 to-pink-400 px-6 text-sm font-black whitespace-nowrap text-slate-950 shadow-lg shadow-sky-500/25 transition-[scale,box-shadow] duration-200 hover:scale-[1.03] hover:shadow-pink-500/25 active:scale-[0.96] motion-reduce:transition-none motion-reduce:hover:scale-100 motion-reduce:active:scale-100">
-                    Open the workspace <ArrowRight size={18} />
-                  </a>
-                </ClickSpark>
-                {sampleHref && (
-                  <a href={sampleHref} className="liquid-glass inline-flex min-h-14 items-center gap-2 rounded-2xl px-5 text-sm font-semibold text-slate-900 transition-[background-color] hover:bg-white/80">
-                    <Box size={17} className="text-sky-600" /> Walk a sample room
-                  </a>
-                )}
-                {fakeHref && (
-                  <a href={fakeHref} className="liquid-glass inline-flex min-h-14 items-center gap-2 rounded-2xl px-5 text-sm font-semibold text-slate-900 transition-[background-color] hover:bg-white/80">
-                    <FileWarning size={17} className="text-pink-600" /> See it catch a fake
-                  </a>
-                )}
-              </div>
-
-              <div className="mt-8 flex flex-wrap gap-x-6 gap-y-3 text-sm text-slate-600">
-                <span className="inline-flex items-center gap-2">
-                  <ShieldCheck size={16} className="text-sky-600" />
-                  No account for landlords
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <Box size={16} className="text-pink-600" />
-                  Real-scale 3D space
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <Glasses size={16} className="text-violet-600" />
-                  Step inside on a Meta Quest
-                </span>
-              </div>
+              <Reveal delay={0.45}>
+                <p className="mt-7 max-w-[34rem] text-lg leading-8 text-steel sm:text-xl sm:leading-9">
+                  The landlord films it with one link. SightSeen rebuilds it in 3D at its real size, so you can{' '}
+                  <RotatingText
+                    texts={['walk through it', 'measure it', 'fit your desk in it', 'check it for a scam']}
+                    highlight
+                    highlightColor="#ffd23f"
+                    effect="slide"
+                    direction="up"
+                    rotationInterval={2600}
+                    staggerDuration={0.012}
+                    mainClassName="inline-flex overflow-hidden rounded-[4px] px-1.5 align-baseline font-semibold text-ink"
+                  />{' '}
+                  before you pay anything.
+                </p>
+              </Reveal>
+              <Reveal delay={0.6}>
+                <div className="mt-10 flex flex-wrap items-center gap-x-6 gap-y-4">
+                  <Magnet padding={70} magnetStrength={3} maxOffset={10}>
+                    <ClickSpark sparkColor={['#0f1f38', '#ffd23f']} sparkCount={14} sparkRadius={52} sparkSize={10} sparkWidth={2} duration={550} shape="line" className="h-auto! w-auto!">
+                      <a href="/workspace"
+                        className="inline-flex min-h-13 items-center rounded-full bg-tape px-7 text-base font-semibold text-ink shadow-[inset_0_-2px_0_rgb(15_31_56/0.16)] transition-[scale] duration-150 ease-out active:scale-[0.96] motion-reduce:transition-none">
+                        Start a request
+                      </a>
+                    </ClickSpark>
+                  </Magnet>
+                  {sampleHref && (
+                    <a href={sampleHref}
+                      className="inline-flex min-h-13 items-center rounded-full bg-white/70 px-6 text-base font-semibold text-ink ring-1 ring-ink/20 backdrop-blur transition-[box-shadow] duration-200 hover:ring-ink/60">
+                      Walk a sample room
+                    </a>
+                  )}
+                  {fakeHref && (
+                    <a href={fakeHref}
+                      className="text-base font-semibold text-ink underline decoration-alert decoration-2 underline-offset-[7px] transition-[text-decoration-thickness] hover:decoration-[3px]">
+                      See it catch a fake
+                    </a>
+                  )}
+                </div>
+              </Reveal>
             </div>
 
-            <div className="animate-float relative mx-auto w-full max-w-xl">
-              <div className="animate-pulse-glow absolute -inset-7 rounded-[3rem] bg-gradient-to-br from-cyan-300/40 via-violet-300/20 to-pink-300/40 blur-3xl" />
-
-              <div className="relative aspect-[4/5] overflow-hidden rounded-[2.2rem] border border-slate-900/10 bg-white shadow-2xl shadow-slate-900/15">
+            <Reveal delay={0.25} className="mx-auto w-full max-w-md">
+              <div className="animate-float relative aspect-[4/5] overflow-hidden rounded-[26px] bg-white shadow-[0_30px_70px_-30px_rgb(15_31_56/0.55)] ring-1 ring-ink/10">
                 <DitherVeil
                   src="/images/room-hero.jpg"
                   fit="cover"
@@ -145,99 +191,173 @@ export default function Home() {
                   pixelSize={3}
                   levels={2}
                   palette="duotone"
-                  inkColor="#0b1f33"
-                  paperColor="#f1fbff"
-                  contrast={1.18}
-                  brightness={0.04}
+                  inkColor="#0f1f38"
+                  paperColor="#f4f6f9"
+                  contrast={1.12}
+                  brightness={0.12}
                   revealRadius={165}
                   softness={0.68}
                   linger={0.8}
-                  rimColor="#f472b6"
-                  rim={0.14}
+                  rimColor="#ffd23f"
+                  rim={0.18}
                   clickBurst
                   className="absolute inset-0"
                 />
-
-                <div className="pointer-events-none absolute left-5 top-5 rounded-2xl border border-slate-900/10 bg-white/85 px-3 py-2.5 shadow-sm backdrop-blur-md">
-                  <p className="text-[10px] font-bold tracking-[0.16em] text-sky-700">THE ROOM IN THE AD</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">Is it really like this?</p>
+                <div className="pointer-events-none absolute left-4 top-4 rounded-xl bg-white/90 px-3 py-2 shadow-sm backdrop-blur-md">
+                  <p className="text-xs text-steel">The room in the ad</p>
+                  <p className="mt-0.5 text-sm font-semibold text-ink">Is it really like this?</p>
                 </div>
-
-                <div className="pointer-events-none absolute bottom-5 left-5 right-5 rounded-2xl border border-slate-900/10 bg-white/90 p-4 shadow-sm backdrop-blur-md">
+                <div className="pointer-events-none absolute bottom-4 left-4 right-4 rounded-2xl bg-white/92 p-4 shadow-sm backdrop-blur-md">
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
-                      <p className="text-xs text-slate-600">
+                      <p className="text-xs text-steel">
                         <span className="[@media(hover:none)]:hidden">Move your cursor across the room</span>
                         <span className="hidden [@media(hover:none)]:inline">Touch the room to see through</span>
                       </p>
-                      <p className="mt-1 text-lg font-semibold text-slate-950">See what’s really there.</p>
-                      <p className="mt-0.5 text-[10px] text-slate-500">Picture drawn by Muse Image</p>
+                      <p className="mt-0.5 text-lg font-semibold text-ink">See what’s really there.</p>
+                      <p className="mt-0.5 text-[11px] text-steel">An ad photo Muse Image drew for this demo</p>
                     </div>
                     {sampleHref && (
-                      <a href={sampleHref} className="pointer-events-auto shrink-0 rounded-xl bg-gradient-to-br from-cyan-300 to-pink-400 px-3 py-2 text-xs font-black text-slate-950">
-                        STEP INSIDE
+                      <a href={sampleHref} className="pointer-events-auto shrink-0 rounded-full bg-tape px-3.5 py-2 text-sm font-semibold text-ink">
+                        Step inside
                       </a>
                     )}
                   </div>
                 </div>
               </div>
-            </div>
-          </section>
+            </Reveal>
+          </div>
+        </section>
 
-          <section id="how-it-works" className="border-t border-slate-900/10 py-20">
-            <div className="max-w-2xl">
-              <p className="text-sm font-bold tracking-[0.16em] text-pink-600">HOW IT WORKS</p>
-              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-slate-950 sm:text-4xl">
-                From a phone video to a room you can check.
+        <section className="border-y border-hair bg-paper py-7" aria-label="Meta’s models in SightSeen">
+          <div className="mx-auto flex max-w-7xl items-center gap-8 px-5 sm:px-8">
+            <p className="shrink-0 text-sm text-steel">Built on Meta’s models</p>
+            <LogoLoop
+              logos={MODELS.map(name => ({ node: <span className="font-display text-xl font-[650] whitespace-nowrap text-ink sm:text-2xl">{name}</span>, title: name }))}
+              speed={38}
+              gap={64}
+              logoHeight={32}
+              fadeOut
+              fadeOutColor="#f4f6f9"
+              pauseOnHover
+              ariaLabel="Meta’s models in SightSeen"
+              className="min-w-0 flex-1"
+            />
+          </div>
+        </section>
+
+        {/* The room itself, live: the pipeline's own output */}
+        <section id="live-room" className="mx-auto grid max-w-7xl items-center gap-10 px-5 py-24 sm:px-8 sm:py-28 lg:grid-cols-[minmax(0,0.75fr)_minmax(0,1.25fr)]">
+          <Reveal>
+            <h2 className="font-display text-[clamp(2.1rem,4.2vw,3.4rem)] font-[740] leading-[0.98]">One video in. The room, at its real size.</h2>
+            <p className="mt-6 max-w-md text-lg leading-8 text-steel">
+              This is a hotel room SightSeen rebuilt from a stock video, live in your browser. Move your cursor over it, or drag to
+              turn it. The tape marks are its measured floor: 5.15 by 4.11 m, from two wall plates, so rough until someone checks one
+              length with a tape.
+            </p>
+            {sampleHref && (
+              <a href={sampleHref} className="mt-8 inline-flex min-h-12 items-center rounded-full bg-ink px-6 text-base font-semibold text-white transition-[scale] duration-150 active:scale-[0.96]">
+                Walk a real student’s room
+              </a>
+            )}
+          </Reveal>
+          <Reveal delay={0.15}>
+            <RoomScanHero src="/hero/room-scan.bin" className="aspect-[5/4] w-full lg:aspect-auto lg:h-[min(70vh,40rem)]" />
+          </Reveal>
+        </section>
+
+        <section id="how-it-works" className="border-t border-hair">
+          <div className="mx-auto max-w-7xl px-5 py-24 sm:px-8 sm:py-28">
+            <Reveal>
+              <h2 className="font-display max-w-3xl text-[clamp(2.1rem,4.2vw,3.4rem)] font-[740] leading-[0.98]">
+                One link in. A room you can check out.
               </h2>
-            </div>
-
-            <div className="mt-10 grid gap-4 md:grid-cols-3">
-              {STEPS.map(([number, title, description]) => (
-                <article
-                  key={number}
-                  className="liquid-glass rounded-[1.75rem] p-6 transition-[translate,background-color] duration-300 hover:-translate-y-1 hover:bg-white/75 motion-reduce:transition-none motion-reduce:hover:translate-y-0"
-                >
-                  <span className="text-sm font-black text-sky-600">{number}</span>
-                  <h3 className="mt-8 text-xl font-semibold text-slate-950">{title}</h3>
-                  <p className="mt-3 leading-6 text-slate-600">{description}</p>
-                </article>
+            </Reveal>
+            <ol className="relative mt-14 grid gap-10 md:grid-cols-3 md:gap-10">
+              <span aria-hidden="true" className="absolute inset-x-0 top-0 hidden h-px bg-ink/25 md:block" />
+              {STEPS.map((step, index) => (
+                <li key={step.title} className="relative md:pt-9">
+                  <span aria-hidden="true" className="absolute left-0 top-[-7px] hidden h-[15px] w-px bg-ink md:block" />
+                  <Reveal delay={0.1 + index * 0.12}>
+                    <span className="inline-block rounded-[3px] bg-tape px-1.5 text-sm font-semibold tabular-nums text-ink">{index + 1}</span>
+                    <h3 className="mt-3 text-xl font-semibold leading-snug">{step.title}</h3>
+                    <p className="mt-2 max-w-sm leading-7 text-steel">{step.text}</p>
+                  </Reveal>
+                </li>
               ))}
-            </div>
-          </section>
+            </ol>
+          </div>
+        </section>
 
-          <section id="scam-checks" className="pb-16">
-            <div className="liquid-glass rounded-[2rem] p-7 sm:p-10">
-              <p className="text-sm font-bold tracking-[0.16em] text-pink-600">SCAM CHECKS</p>
-              <h2 className="mt-3 max-w-3xl text-3xl font-semibold tracking-tight text-slate-950">
-                A rental scam shows you a real room the scammer can’t get into.
-              </h2>
-              <p className="mt-3 max-w-2xl leading-7 text-slate-700">
-                So SightSeen asks what stolen photos and a stolen tour can’t answer. The AI reads and compares; plain rules decide.
-              </p>
-
-              <div className="mt-8 grid gap-4 md:grid-cols-2">
-                {CHECKS.map(({ icon: Icon, title, text }) => (
-                  <article key={title} className="rounded-2xl border border-white/70 bg-white/55 p-5">
-                    <Icon size={20} className="text-sky-600" />
-                    <h3 className="mt-3 font-semibold text-slate-950">{title}</h3>
-                    <p className="mt-1.5 text-sm leading-6 text-slate-600">{text}</p>
-                  </article>
+        <section id="scam-checks" className="border-t border-hair bg-white/60">
+          <div className="mx-auto grid max-w-7xl items-center gap-14 px-5 py-24 sm:px-8 sm:py-28 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+            <div>
+              <Reveal>
+                <h2 className="font-display text-[clamp(2.1rem,4.2vw,3.4rem)] font-[740] leading-[0.98]">
+                  A scam tour shows a real room the scammer can’t get into.
+                </h2>
+                <p className="mt-6 max-w-xl text-lg leading-8 text-steel">
+                  So SightSeen asks what stolen photos and a stolen tour can’t answer. The AI reads and compares. Plain rules decide.
+                </p>
+              </Reveal>
+              <dl className="mt-10 divide-y divide-hair border-y border-hair">
+                {CHECKS.map((check, index) => (
+                  <Reveal key={check.title} delay={0.08 * index}>
+                    <div className="grid gap-1 py-5 sm:grid-cols-[12.5rem_minmax(0,1fr)] sm:gap-6">
+                      <dt className="font-semibold">{check.title}</dt>
+                      <dd className="leading-7 text-steel">{check.text}</dd>
+                    </div>
+                  </Reveal>
                 ))}
-              </div>
-
-              <p className="mt-6 max-w-2xl text-sm leading-6 text-slate-700">
-                What this can’t do: it shows whoever filmed was standing in that room, not that they own it. Ask for the
-                lease and an ID before you pay anything.
-              </p>
+              </dl>
             </div>
-          </section>
+            <Reveal delay={0.15} className="flex flex-col items-center gap-5">
+              <div className="hidden lg:block">
+                <TiltedCard containerWidth="25rem" containerHeight="24.25rem" imageWidth="25rem" imageHeight="24.25rem"
+                  rotateAmplitude={9} scaleOnHover={1.03} glare={0.14} shadow={0} radius={18} perspective={900}>
+                  <VerdictCard />
+                </TiltedCard>
+              </div>
+              <div className="lg:hidden"><VerdictCard /></div>
+              {fakeHref && (
+                <a href={fakeHref} className="text-sm font-semibold underline decoration-ink/30 underline-offset-4 hover:decoration-ink">
+                  Open this room and see the evidence
+                </a>
+              )}
+            </Reveal>
+          </div>
+        </section>
 
-          <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-900/10 pb-4 pt-6 text-sm text-slate-600">
-            <p>Built for Meta’s Global AI Developer Hackathon with MapAnything, Muse Spark, Muse Image, SAM 3.1 and SAM 3D Objects.</p>
-            <a href={REPO} className="font-semibold text-slate-900 underline decoration-slate-300 underline-offset-4 hover:decoration-sky-500">Code on GitHub</a>
-          </footer>
-        </div>
+        <section id="numbers" className="border-y border-hair" aria-label="Measured on real runs">
+          <div className="mx-auto grid max-w-7xl gap-x-10 gap-y-12 px-5 py-20 sm:grid-cols-2 sm:px-8 lg:grid-cols-4">
+            {NUMBERS.map((item, index) => (
+              <Reveal key={item.text} delay={index * 0.1}>
+                <p className="font-display text-5xl font-[760] tabular-nums leading-none">
+                  <CountUp to={item.to} decimals={item.decimals} duration={1.6} suffix={item.suffix} trigger="view" />
+                </p>
+                <p className="mt-4 max-w-[17rem] leading-7 text-steel">{item.text}</p>
+              </Reveal>
+            ))}
+          </div>
+        </section>
+
+        <section className="mx-auto grid max-w-7xl gap-6 px-5 py-20 sm:px-8 lg:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
+          <Reveal><h2 className="font-display text-3xl font-[740] leading-none sm:text-4xl">What it can’t do</h2></Reveal>
+          <Reveal delay={0.1}>
+            <p className="max-w-2xl text-lg leading-8 text-steel">
+              It shows whoever filmed was standing in that room, not that they own it, so ask for the lease and an ID before you pay
+              anything. And a new room’s size is rough until someone measures one length with a tape.
+            </p>
+          </Reveal>
+        </section>
+
+        <footer className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 border-t border-hair px-5 py-8 text-sm text-steel sm:px-8">
+          <p>Built for Meta’s Global AI Developer Hackathon by Sidharth Nair and Trinidad Laguardia.</p>
+          <div className="flex gap-6">
+            <a href="/workspace" className="font-semibold text-ink hover:underline">Workspace</a>
+            <a href={REPO} className="font-semibold text-ink hover:underline">The code on GitHub</a>
+          </div>
+        </footer>
       </main>
     </>
   )

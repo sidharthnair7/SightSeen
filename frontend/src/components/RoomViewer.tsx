@@ -23,7 +23,7 @@ const MARK = '#f59e0b'
 // One look for every control on the room: on is amber, and a press gives a little
 const TOOL = 'inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium transition-[scale,background-color] duration-150 ease-out enabled:active:scale-[0.96] motion-reduce:transition-none motion-reduce:enabled:active:scale-100'
 const OFF = 'glass-dark hover:bg-black/70'
-const ON = 'bg-cyan-300 text-slate-950'
+const ON = 'bg-tape text-ink'
 const KEY_WALK = 1.3 // metres a second with W A S D: a walking pace
 const WALK_STEP = 0.1 // metres per scroll notch
 const WALK_FOV = 70 // degrees top to bottom in the Walk look: about what a person sees without turning their head
@@ -450,7 +450,7 @@ export default function RoomViewer({ url, canResize = !STATIC, startOnChecks = f
   useEffect(() => {
     const before = shown.current
     shown.current = showing
-    if (splatMesh.current) splatMesh.current.visible = showing === 'real'
+    showSplats(splatMesh.current, showing === 'real')
     if (surfaceMesh.current) surfaceMesh.current.visible = showing === 'solid'
     if (shellMesh.current) shellMesh.current.visible = showing !== 'dots'
     if (blocks.current) blocks.current.visible = showing === 'walk'
@@ -816,7 +816,7 @@ export default function RoomViewer({ url, canResize = !STATIC, startOnChecks = f
           room.remove(splats)
           splats.dispose()
         }
-        pieces.parts.visible = shown.current === 'real'
+        showSplats(pieces.parts, shown.current === 'real')
         room.add(pieces.parts)
         splatMesh.current = pieces.parts
         setHasSplats(true)
@@ -1088,7 +1088,7 @@ export default function RoomViewer({ url, canResize = !STATIC, startOnChecks = f
   const dockItems: (DockItem | false)[] = [
     { label: 'Before you sign', icon: <ShieldCheck />, active: issuesOpen, onClick: () => panel('issues') },
     rebuiltLook && { label: 'Your things', icon: <Package />, active: itemsOpen, onClick: () => panel('things') },
-    LIVE && rebuiltLook && { label: painting ? 'Painting...' : 'See it real', icon: painting ? <Loader2 className="animate-spin motion-reduce:animate-none" /> : <Sparkles className="text-pink-300" />, disabled: painting, onClick: seeItReal },
+    LIVE && rebuiltLook && { label: painting ? 'Painting...' : 'See it real', icon: painting ? <Loader2 className="animate-spin motion-reduce:animate-none" /> : <Sparkles className="text-tape" />, disabled: painting, onClick: seeItReal },
     {
       label: inVr ? 'In VR' : canVr ? 'Enter VR' : 'VR on a Meta Quest', icon: <Glasses />, active: inVr || vrHint, disabled: inVr || (canVr && !hasRebuilt),
       onClick: () => {
@@ -1158,7 +1158,7 @@ export default function RoomViewer({ url, canResize = !STATIC, startOnChecks = f
           )}
           {vrError && <span className="mt-1 block text-xs text-red-300">{vrError}</span>}
           {painting && (
-            <span className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
+            <span className="mt-1 flex items-center gap-1.5 text-xs text-tape">
               <Loader2 size={13} className="animate-spin motion-reduce:animate-none" /> Muse Image is painting this view (about 30 seconds).
             </span>
           )}
@@ -1189,7 +1189,7 @@ export default function RoomViewer({ url, canResize = !STATIC, startOnChecks = f
                 className="w-16 rounded bg-white/90 px-2 py-1 text-base text-slate-900 sm:text-xs" aria-label="Its real length in centimetres" />
               <span>cm</span>
               <button type="submit" disabled={scaleBusy}
-                className="rounded bg-cyan-300 px-2 py-1 font-medium text-slate-950 hover:bg-cyan-200 disabled:opacity-60">
+                className="rounded bg-tape px-2 py-1 font-medium text-ink hover:brightness-105 disabled:opacity-60">
                 {scaleBusy ? 'Resizing the room (about a minute)...' : 'Set the size'}
               </button>
             </div>
@@ -1214,7 +1214,7 @@ export default function RoomViewer({ url, canResize = !STATIC, startOnChecks = f
           {showing === 'dots' && (
             <label className="glass-chip flex items-center gap-2 rounded-lg">
               Dot size
-              <input type="range" min={0.5} max={3} step={0.25} value={dots} onChange={e => setDots(Number(e.target.value))} className="w-20 accent-cyan-300" />
+              <input type="range" min={0.5} max={3} step={0.25} value={dots} onChange={e => setDots(Number(e.target.value))} className="w-20 accent-tape" />
             </label>
           )}
         </div>
@@ -1288,7 +1288,7 @@ export default function RoomViewer({ url, canResize = !STATIC, startOnChecks = f
               <button type="button" onClick={() => goSpot(spot - 1)} disabled={spot === 0} className="px-2.5 py-2 hover:bg-white/10 disabled:opacity-40" aria-label="The spot before" title="The spot before (←)">
                 <ChevronLeft size={14} />
               </button>
-              <input type="range" min={0} max={spotCount - 1} value={spot} onChange={e => goSpot(Number(e.target.value))} className="w-28 accent-cyan-300" aria-label="Filmed spot" />
+              <input type="range" min={0} max={spotCount - 1} value={spot} onChange={e => goSpot(Number(e.target.value))} className="w-28 accent-tape" aria-label="Filmed spot" />
               <span className="px-2 tabular-nums">{spot + 1} / {spotCount}</span>
               <button type="button" onClick={() => goSpot(spot + 1)} disabled={spot === spotCount - 1} className="px-2.5 py-2 hover:bg-white/10 disabled:opacity-40" aria-label="The next spot" title="The next spot (→)">
                 <ChevronRight size={14} />
@@ -1335,6 +1335,14 @@ export default function RoomViewer({ url, canResize = !STATIC, startOnChecks = f
       )}
     </div>
   )
+}
+
+/** Shows or hides the room's splats: the single file, or every one of its movable pieces. Each piece gets the flag
+ *  itself, not just their group, so a desktop browser can't draw pieces over the Rebuilt look while the group is hidden. */
+function showSplats(root: THREE.Object3D | null, show: boolean) {
+  root?.traverse(part => {
+    part.visible = show
+  })
 }
 
 /** Frees every mesh's geometry and material under `root`. */

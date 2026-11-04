@@ -27,12 +27,12 @@ export default function SiteNav({ items, activeHref, compact = false }: { items:
         style={{ maxWidth: small ? '37rem' : '80rem' }}
         className={`pointer-events-auto flex w-full items-center justify-between gap-3 rounded-full border transition-[max-width,padding,background-color,border-color,box-shadow] duration-300 ease-out motion-reduce:transition-none ${
           small
-            ? 'border-slate-900/10 bg-white/80 py-1 pl-1.5 pr-1 shadow-xl shadow-slate-900/10 backdrop-blur-xl'
+            ? 'border-ink/10 bg-white/85 py-1 pl-1.5 pr-1 shadow-[0_12px_32px_-12px_rgb(15_31_56/0.28)] backdrop-blur-xl'
             : 'border-transparent bg-transparent py-1.5 pl-1 pr-1'
         }`}
       >
-        <a href="/" aria-label="SightSeen, home" className="flex shrink-0 items-center gap-2 rounded-full font-bold tracking-tight text-slate-900 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500">
-          <span className={`grid place-items-center rounded-full bg-gradient-to-br from-cyan-300 via-sky-400 to-pink-500 text-slate-950 shadow-md shadow-sky-500/25 transition-[width,height] duration-300 ease-out motion-reduce:transition-none ${small ? 'h-8 w-8' : 'h-10 w-10'}`}>
+        <a href="/" aria-label="SightSeen, home" className="flex shrink-0 items-center gap-2 rounded-full font-bold tracking-tight text-ink outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink">
+          <span className={`grid place-items-center rounded-full bg-tape text-ink shadow-[inset_0_-2px_0_rgb(15_31_56/0.16)] transition-[width,height] duration-300 ease-out motion-reduce:transition-none ${small ? 'h-8 w-8' : 'h-10 w-10'}`}>
             <ScanLine size={small ? 17 : 21} strokeWidth={2.7} />
           </span>
           <span className={`overflow-hidden whitespace-nowrap text-lg transition-[max-width,opacity] duration-300 ease-out motion-reduce:transition-none ${small ? 'max-w-0 opacity-0' : 'max-w-32 opacity-100'}`}>
@@ -51,9 +51,9 @@ export default function SiteNav({ items, activeHref, compact = false }: { items:
           itemStyle="plain"
           hoverEffect="glide"
           indicator="pill"
-          highlightColor="linear-gradient(135deg, #22d3ee 0%, #f472b6 100%)"
-          highlightTextColor="#04101b"
-          textColor="#0f172a"
+          highlightColor="#0f1f38"
+          highlightTextColor="#ffffff"
+          textColor="#0f1f38"
           collapse="auto"
           intro={false}
           className="max-w-[calc(100vw-5.5rem)] data-[collapsed]:w-auto! data-[collapsed]:justify-end"

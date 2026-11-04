@@ -181,8 +181,10 @@ AI coding assistants, directed by us.
 
 **Brought in, and adapted:**
 - The room's dock and glass styling come from Sidharth's earlier project, [Remembrance](https://github.com/sidharthnair7/Remembrance).
-- The landing page's nav, dither, spark and shiny-text components (`PillNav`, `DitherVeil`, `ClickSpark`, `ShinyText`) are from
-  React Bits.
+- These components in `frontend/src/components` are from React Bits, adapted to SightSeen's look: `PillNav`, `DitherVeil`,
+  `ClickSpark`, `ShinyText` (chosen by Trinidad for the landing page), and `Threads`, `BlurText`, `RotatingText`, `CountUp`,
+  `TiltedCard`, `Magnet` and `LogoLoop` (the landing page's background, motion and model strip).
+- The landing page's live 3D room (`RoomScanHero.tsx`) is ours: SightSeen's own rebuild of the stock hotel video, as points.
 
 **Models:** Muse Spark, Muse Image and SAM 3.1 through the Meta Model API; MapAnything and SAM 3D Objects as open weights.
 
@@ -195,7 +197,7 @@ sample's example ads and the landing page's picture were made with Muse Image. N
 
 ## Licence
 
-SightSeen's own code is under the [MIT License](LICENSE). The four React Bits components keep their own licence (MIT +
+SightSeen's own code is under the [MIT License](LICENSE). The eleven React Bits components keep their own licence (MIT +
 Commons Clause, in [`frontend/src/components/REACT-BITS-LICENSE.md`](frontend/src/components/REACT-BITS-LICENSE.md)). The
 models and tools it uses keep theirs: MapAnything's checkpoint (Apache 2.0), SAM 3D Objects (SAM License), Brush (Apache
 2.0), Spark (MIT) and COLMAP (BSD).

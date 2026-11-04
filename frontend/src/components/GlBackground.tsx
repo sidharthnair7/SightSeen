@@ -45,14 +45,15 @@ void main() {
   vec2 r = vec2(fbm(p + 2.2 * q + vec2(1.7, 9.2) + 0.7 * t), fbm(p + 2.2 * q + vec2(8.3, 2.8) - 0.5 * t));
   float f = fbm(p + 2.4 * r);
 
-  vec3 base = vec3(0.973, 0.984, 1.0);
-  vec3 cyan = vec3(0.66, 0.93, 0.98);
-  vec3 pink = vec3(0.99, 0.79, 0.90);
-  vec3 violet = vec3(0.85, 0.82, 0.99);
-  vec3 colour = mix(base, cyan, smoothstep(0.28, 0.72, q.x) * 0.8);
-  colour = mix(colour, pink, smoothstep(0.32, 0.74, r.y) * 0.72);
-  colour = mix(colour, violet, smoothstep(0.38, 0.82, f) * 0.5);
-  colour = mix(colour, base, 0.22);
+  // SightSeen's palette, washed out: paper, a breath of steel blue, a breath of tape yellow
+  vec3 base = vec3(0.957, 0.965, 0.976);
+  vec3 steel = vec3(0.84, 0.875, 0.93);
+  vec3 tape = vec3(1.0, 0.93, 0.70);
+  vec3 ink = vec3(0.80, 0.83, 0.89);
+  vec3 colour = mix(base, steel, smoothstep(0.28, 0.72, q.x) * 0.7);
+  colour = mix(colour, tape, smoothstep(0.36, 0.78, r.y) * 0.45);
+  colour = mix(colour, ink, smoothstep(0.4, 0.84, f) * 0.35);
+  colour = mix(colour, base, 0.3);
   colour += (hash(gl_FragCoord.xy + fract(uTime)) - 0.5) * 0.008; // a little grain, so the soft bands don't show
   gl_FragColor = vec4(colour, 1.0);
 }`
