@@ -37,6 +37,35 @@ export async function fetchModel(folder: string, file: string, light = false): P
 // What the video never saw, when it's shown: tinted towards this colour, half and half
 const NOT_FILMED = new THREE.Color('#a855f7')
 
+let shadowTexture: THREE.Texture | null = null
+
+/** A soft dark patch on the floor under a thing's footprint (its measured size and turn), a few millimetres up so it
+ *  never flickers into the floor. Clicks and measuring go straight through it. */
+function contactShadow(centre: number[], size: number[], yawDegrees: number) {
+  if (!shadowTexture) {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 128
+    const paint = canvas.getContext('2d')!
+    const gradient = paint.createRadialGradient(64, 64, 2, 64, 64, 64)
+    gradient.addColorStop(0, 'rgba(0, 0, 0, 0.6)')
+    gradient.addColorStop(0.5, 'rgba(0, 0, 0, 0.32)')
+    gradient.addColorStop(1, 'rgba(0, 0, 0, 0)')
+    paint.fillStyle = gradient
+    paint.fillRect(0, 0, 128, 128)
+    shadowTexture = new THREE.CanvasTexture(canvas)
+  }
+  const shadow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+    new THREE.MeshBasicMaterial({ map: shadowTexture, transparent: true, depthWrite: false, opacity: 0.85 }))
+  shadow.rotation.order = 'YXZ'
+  shadow.rotation.set(-Math.PI / 2, -THREE.MathUtils.degToRad(yawDegrees), 0)
+  shadow.scale.set(Math.abs(size[0]) * 1.3 + 0.12, Math.abs(size[2]) * 1.3 + 0.12, 1)
+  shadow.position.set(centre[0], 0.005, centre[2])
+  shadow.renderOrder = 1
+  shadow.name = 'contact shadow'
+  shadow.raycast = () => {}
+  return shadow
+}
+
 export type Rebuilt = {
   group: THREE.Group
   movable: Movable
@@ -85,6 +114,11 @@ export async function loadRebuilt(
     // Unlit like the walls: the colours are the photo's own light and shade (both sides, for any open seam)
     const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
     mesh.name = thing.name
+    // A thing standing on the floor gets a soft shadow under it (it moves with it), or thin legs read as floating
+    geometry.computeBoundingBox()
+    if (!thing.fixed && geometry.boundingBox && geometry.boundingBox.min.y < 0.06) {
+      mesh.add(contactShadow(thing.centre, thing.size, thing.yawDegrees))
+    }
     group.add(mesh)
     ;(thing.fixed ? fixed : pieces).push({ ...thing, object: mesh })
   }))
