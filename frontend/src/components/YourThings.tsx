@@ -223,7 +223,7 @@ export default function YourThings({ base, room, scale, open, onClose, onReady, 
   if (!open) return null
   const canFilm = typeof window !== 'undefined' && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia
   return (
-    <div className="absolute right-3 top-3 z-20 max-h-[calc(100%-1.5rem)] w-[min(20rem,calc(100%-1.5rem))] overflow-y-auto overscroll-contain rounded-xl bg-white/95 p-4 text-sm text-slate-800 shadow-lg">
+    <div className="stage-panel">
       <div className="flex items-center justify-between">
         <p className="inline-flex items-center gap-1.5 font-medium text-slate-900">
           <Package size={16} /> Your things
@@ -315,7 +315,7 @@ export default function YourThings({ base, room, scale, open, onClose, onReady, 
             aria-label="Its longest side in centimetres" inputMode="decimal" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-xs" />
           {error && <p className="text-xs text-red-700" role="alert">{error}</p>}
           <button type="button" onClick={send} disabled={sending}
-            className={`w-full rounded-lg bg-teal-700 px-3 py-2 text-xs font-medium text-white hover:bg-teal-600 disabled:opacity-50 ${PRESS}`}>
+            className={`w-full rounded-lg bg-gradient-to-r from-cyan-300 via-sky-400 to-pink-400 text-slate-950 px-3 py-2 text-xs font-semibold hover:brightness-105 disabled:opacity-50 ${PRESS}`}>
             {sending ? 'Sending...' : 'Build it in 3D'}
           </button>
         </div>

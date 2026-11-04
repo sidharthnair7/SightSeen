@@ -1,8 +1,9 @@
 """The whole room after the 3D step, in one go: the steps that were run by hand on take 4. The walls get the video's
 photos and clean materials, the scale is checked against wall plates, the room's things are found, rebuilt by SAM 3D
 and set in the room, then the issues are looked for (after the things, so a wall hidden behind a wardrobe isn't
-"never filmed"). Each step writes its progress to pipeline.json and to `stage` (the page shows it). A step that fails
-is noted and the rest go on, so the room still opens with what's done.
+"never filmed"). The scam checks run on the video too (room_trust.py: the one-time code, real depth). Each step writes
+its progress to pipeline.json and to `stage` (the page shows it). A step that fails is noted and the rest go on, so the
+room still opens with what's done.
 
 A quick run rebuilds only the MOST biggest things: small clutter (a sock, a bottle) is left out, and a room is ready
 in minutes instead of most of an hour.
@@ -12,9 +13,11 @@ import json
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 MOST = 12  # things a quick run rebuilds: the biggest ones
+HOSTED_TRIANGLES = 60_000  # a hosted room's things at most, each: the whole room stays under about 20 MB to fetch
 
 
 def _keep_biggest(out, most):
@@ -31,15 +34,41 @@ def _keep_biggest(out, most):
     return min(len(things), most)
 
 
-def finish(out, runner="local", most=MOST, stage=print, walls_done=None):
+def _lighten(out):
+    """A hosted room goes over the internet to browsers and headsets, and SAM 3D's things run to half a million triangles
+    each. Each thing is thinned for the web, with a lighter copy for a headset (vr-<file>), and the point cloud gets a
+    light copy the page loads instead (room-light.ply; room.ply stays for the rebuilds)."""
+    import export_static
+
+    out = Path(out)
+    things = json.loads((out / "room-things.json").read_text())["things"]
+    export_static.headset_copies([out / thing["file"] for thing in things if thing.get("file") and (out / thing["file"]).exists()])
+
+    def one(thing):
+        path = out / thing.get("file", "")
+        if not thing.get("file") or not path.exists():
+            return 0
+        spare = path.with_name(f"thin-{path.name}")
+        before, after = export_static._thin(path, spare, HOSTED_TRIANGLES)
+        spare.replace(path)
+        return before - after
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        saved = sum(pool.map(one, things))
+    export_static.thin_cloud(out / "room.ply", out / "room-light.ply")
+    return {"things": len(things), "trianglesSaved": int(saved)}
+
+
+def finish(out, runner="local", most=MOST, stage=print, walls_done=None, code=None):
     """Every step after reconstruct.run, in order (see the module's doc). `walls_done` is called once the walls are
-    finished and sized (the hosted pipeline opens the room then, and the things come in later). Returns what
-    pipeline.json says."""
+    finished and sized (the hosted pipeline opens the room then, and the things come in later). `code` is the room's
+    one-time code, when its link gave one. Returns what pipeline.json says."""
     import rebuild_things
     import room_issues
     import room_materials
     import room_scale
     import room_textures
+    import room_trust
 
     out = Path(out)
     record = {"runner": runner, "most": most, "steps": [], "done": False}
@@ -83,10 +112,12 @@ def finish(out, runner="local", most=MOST, stage=print, walls_done=None):
     step("scale", "checking the room's size against wall plates", scale)
     if walls_done:
         walls_done()
+    step("trust", "checking the video: the one-time code and real depth", lambda: room_trust.find_trust(out, code))
     if step("pick", "finding the room's things (Muse Spark and SAM 3.1)", lambda: rebuild_things.pick(out)):
         kept = _keep_biggest(out, most)
         if step("build", f"rebuilding the {kept} biggest things in 3D (SAM 3D)", build):
-            step("place", "setting each thing in the room", lambda: rebuild_things.place(out))
+            if step("place", "setting each thing in the room", lambda: rebuild_things.place(out)) and runner == "modal":
+                step("light", "making the models light enough for a browser and a headset", lambda: _lighten(out))
     step("issues", "looking for damage and what was never filmed", lambda: room_issues.find(out))
     record["done"] = True
     save()

@@ -3,8 +3,10 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js'
 import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark'
-import { AlertTriangle, ArrowDown, ArrowUp, Camera, ChevronLeft, ChevronRight, Eye, Glasses, Hand, Package, Ruler, RotateCcw, RotateCw, Undo2, X } from 'lucide-react'
-import { STATIC } from '../api'
+import { ArrowDown, ArrowUp, Camera, ChevronLeft, ChevronRight, ChevronsLeftRight, Eye, Glasses, Hand, Info, Loader2, Package, Ruler, RotateCcw, RotateCw, ShieldCheck, Sparkles, Undo2, X } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { API_BASE, LIVE, STATIC } from '../api'
+import Dock, { type DockItem } from './Dock'
 import YourThings, { type Item } from './YourThings'
 import Issues, { type IssuesReport, type MeasuredRoom } from './Issues'
 import { SHELL_FACES, type RoomShell } from './walk/types'
@@ -20,8 +22,9 @@ import { filmedSpots, type Spots } from './walk/filmedSpots'
 const MARK = '#f59e0b'
 // One look for every control on the room: on is amber, and a press gives a little
 const TOOL = 'inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium transition-[scale,background-color] duration-150 ease-out enabled:active:scale-[0.96] motion-reduce:transition-none motion-reduce:enabled:active:scale-100'
-const OFF = 'bg-black/60 text-white hover:bg-black/80'
-const ON = 'bg-amber-500 text-black'
+const OFF = 'glass-dark hover:bg-black/70'
+const ON = 'bg-cyan-300 text-slate-950'
+const KEY_WALK = 1.3 // metres a second with W A S D: a walking pace
 const WALK_STEP = 0.1 // metres per scroll notch
 const WALK_FOV = 70 // degrees top to bottom in the Walk look: about what a person sees without turning their head
 // The clean shell sits this far behind the found walls. The worker trims the splats on and beyond the walls, so the
@@ -52,24 +55,17 @@ function areaTolerance(frame: RoomFrame): number {
 /** Where a room's real size comes from, in a few words, with how sure it is. */
 function scaleSource(frame: RoomFrame): string {
   const evidence = frame.scaleEvidence
-  if (!frame.scale || !evidence) return "MapAnything's own scale, not yet checked (typically off by about 15%)"
+  if (!frame.scale || !evidence) return "MapAnything's own scale, a rough guess until one length is measured with a tape"
   if (evidence.source === 'tape measure') return `checked with a tape measure (${evidence.what?.replace('-', ' ')})`
-  return `rough, from ${evidence.plates ?? 'standard'} wall plates (±${Math.round(lengthTolerance(frame) * 100)}%)`
+  return `rough, from ${evidence.plates ?? 'standard'} wall plates: measure one length with a tape`
 }
 
-/** How sure a length is, as a share either way (about 95%): a tape measure to about 2%; wall plates by how much they
- * disagree (the median of n readings: 1.96 standard errors, from their middle half's spread); MapAnything's own
- * scale is off 13 to 16% on average (its paper). */
+/** How sure a length is, as a share either way. A tape measure, carried across the whole room: about 5%. Wall plates: 35%,
+ * the one error measured so far (on the sample room they said 1.03 where a tape said 1.40), since how much plates agree with
+ * each other says nothing about how far off they all are. MapAnything alone: its paper says 13 to 16% on average, and the
+ * sample room was 28% off, so also 35%, which keeps the size check from judging an ad on a guess. */
 function lengthTolerance(frame: RoomFrame): number {
-  const evidence = frame.scaleEvidence
-  if (!frame.scale || !evidence) return 0.15
-  if (evidence.source === 'tape measure') return 0.05 // one length, carried across the whole room
-  if (evidence.spread?.length === 2) {
-    const n = evidence.ratiosKept ?? 2 * (evidence.plates ?? 1)
-    const sigma = (evidence.spread[1] - evidence.spread[0]) / 1.349
-    return Math.max(0.02, (1.96 * 1.2533 * sigma) / Math.sqrt(n) / frame.scale)
-  }
-  return 0.15
+  return frame.scale && frame.scaleEvidence?.source === 'tape measure' ? 0.05 : 0.35
 }
 
 /** "the bed", or "your chair" for one of the student's own things. */
@@ -135,7 +131,20 @@ function pick(look: Look, hasSplats: boolean, hasSurface: boolean, hasWalk: bool
  * surface when there is one, even in the Real look, because a surface gives a steadier point than a blurry splat.
  * In the dots look, the dot-size slider makes the points bigger, so the room looks less see-through.
  */
-export default function RoomViewer({ url, canResize = !STATIC }: { url: string; canResize?: boolean }) {
+export default function RoomViewer({ url, canResize = !STATIC, startOnChecks = false, startOnAbout = false, title, about, notice, codeAsked = null }: {
+  url: string
+  canResize?: boolean
+  /** Open on the scam checks, or on what this room is */
+  startOnChecks?: boolean
+  startOnAbout?: boolean
+  title: string
+  /** What the About panel says */
+  about: ReactNode
+  /** A line under the room's name while its things are still being built */
+  notice?: string | null
+  /** The one-time code this room's link asked for, if any */
+  codeAsked?: string | null
+}) {
   const host = useRef<HTMLDivElement>(null)
   const clear = useRef<() => void>(() => {})
   const material = useRef<THREE.PointsMaterial | null>(null)
@@ -166,8 +175,19 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
   const [scaleError, setScaleError] = useState<string | null>(null)
   const scaleRef = useRef(1) // real metres per room unit
   const [roomSize, setRoomSize] = useState<MeasuredRoom | null>(null)
-  const [issuesOpen, setIssuesOpen] = useState(false)
+  const [issuesOpen, setIssuesOpen] = useState(startOnChecks)
+  // On a phone the panel would cover the room, so it waits to be asked for
+  const [aboutOpen, setAboutOpen] = useState(startOnAbout && typeof window !== 'undefined' && window.innerWidth >= 900)
+  const [vrHint, setVrHint] = useState(false) // a browser with no headset: where VR is
+  // See it real: Muse Image's picture of this view, beside the frozen 3D view it came from
+  const [picture, setPicture] = useState<{ real: string; rough: string } | null>(null)
+  const [painting, setPainting] = useState(false)
+  const [pictureError, setPictureError] = useState<string | null>(null)
+  const [split, setSplit] = useState(62)
+  const grabView = useRef<() => Promise<{ blob: Blob; width: number; height: number } | null>>(async () => null)
+  const showFrame = useRef<(frame: string) => void>(() => {})
   const issueMarks = useRef<THREE.Group | null>(null) // red boxes (damage) and yellow outlines (never filmed)
+  const lastReport = useRef<IssuesReport | null>(null) // kept for when the things arrive after the report does
   const [dots, setDots] = useState(1)
   const spots = useRef<Spots | null>(null) // the Real look's spots the video was filmed from
   const spotIndex = useRef(0)
@@ -197,6 +217,7 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
   const lookTowards = useRef<(point: THREE.Vector3) => void>(() => {})
   const overview = useRef<() => void>(() => {}) // the Rebuilt look's opening view: a corner, the whole room in sight
   const walkBy = useRef<(metres: number) => void>(() => {})
+  const stepBy = useRef<(metres: number) => void>(() => {})
   const [realAspect, setRealAspect] = useState<number | null>(null) // the phone's picture, width over height
   // The room's API address (/api/requests/{id}), from its room.ply URL: the student's things live under it
   const itemsBase = url.split('?')[0].replace('/room.ply', '')
@@ -208,6 +229,10 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
   useEffect(() => {
     if (material.current) material.current.size = baseSize.current * dots
   }, [dots, state])
+
+  useEffect(() => {
+    if (hasRebuilt && lastReport.current) showIssues(lastReport.current)
+  }, [hasRebuilt])
 
   useEffect(() => {
     let gone = false
@@ -324,6 +349,52 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
     return () => window.removeEventListener('keydown', onKey)
   }, [showing, spotCount])
 
+  // W A S D or the arrow keys walk you round the room, at a walking pace in real metres
+  useEffect(() => {
+    if (showing !== 'rebuilt' && showing !== 'walk') return
+    const KEYS: Record<string, [number, number]> = {
+      w: [1, 0], arrowup: [1, 0], s: [-1, 0], arrowdown: [-1, 0], a: [0, -1], arrowleft: [0, -1], d: [0, 1], arrowright: [0, 1],
+    }
+    const pressed = new Set<string>()
+    const onDown = (e: KeyboardEvent) => {
+      const typing = e.target instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)
+      const key = e.key.toLowerCase()
+      if (typing || !(key in KEYS) || e.metaKey || e.ctrlKey || e.altKey) return
+      e.preventDefault()
+      pressed.add(key)
+    }
+    const onUp = (e: KeyboardEvent) => pressed.delete(e.key.toLowerCase())
+    const onBlur = () => pressed.clear()
+    let frame = 0
+    let last = performance.now()
+    const tick = (now: number) => {
+      const seconds = Math.min(0.1, (now - last) / 1000)
+      last = now
+      if (pressed.size) {
+        const pace = (KEY_WALK * seconds) / scaleRef.current
+        let ahead = 0
+        let side = 0
+        pressed.forEach(key => {
+          ahead += KEYS[key][0]
+          side += KEYS[key][1]
+        })
+        if (ahead) walkBy.current(Math.sign(ahead) * pace)
+        if (side) stepBy.current(Math.sign(side) * pace)
+      }
+      frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    window.addEventListener('keydown', onDown)
+    window.addEventListener('keyup', onUp)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('keydown', onDown)
+      window.removeEventListener('keyup', onUp)
+      window.removeEventListener('blur', onBlur)
+    }
+  }, [showing])
+
   // One of the student's things, built (its own middle at x = z = 0 and its bottom at y = 0, in the room's units):
   // square to the walls, on the free floor nearest the room's middle (the middle itself when nowhere is free), shown
   // with the rebuilt things and picked up like them
@@ -438,6 +509,16 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
       if (shown.current === 'real' && spots.current) return // the Real look steps between filmed spots instead
       walkBy.current(THREE.MathUtils.clamp(-e.deltaY * 0.002, -WALK_STEP, WALK_STEP))
     }
+    grabView.current = () => {
+      renderer.render(scene, camera) // straight before reading it: the canvas is only readable in the same moment
+      const source = renderer.domElement
+      const shrink = Math.min(1, 1024 / Math.max(source.width, source.height))
+      const canvas = document.createElement('canvas')
+      canvas.width = Math.round(source.width * shrink)
+      canvas.height = Math.round(source.height * shrink)
+      canvas.getContext('2d')?.drawImage(source, 0, 0, canvas.width, canvas.height)
+      return new Promise(done => canvas.toBlob(blob => done(blob ? { blob, width: canvas.width, height: canvas.height } : null), 'image/jpeg', 0.92))
+    }
     walkBy.current = amount => {
       const ahead = camera.getWorldDirection(new THREE.Vector3()).setY(0)
       if (ahead.lengthSq() < 1e-6) return
@@ -445,7 +526,14 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
       camera.position.add(ahead)
       controls.target.add(ahead)
     }
-    // Wherever the wheel or a right-drag leads, the view stays in the room
+    stepBy.current = amount => {
+      const ahead = camera.getWorldDirection(new THREE.Vector3()).setY(0)
+      if (ahead.lengthSq() < 1e-6) return
+      const side = new THREE.Vector3(-ahead.z, 0, ahead.x).normalize().multiplyScalar(amount)
+      camera.position.add(side)
+      controls.target.add(side)
+    }
+    // Wherever the wheel, a key or a right-drag leads, the view stays in the room
     const keepInside = () => {
       if (!shell || shown.current === 'real') return
       const local = shell.worldToLocal(camera.position.clone())
@@ -486,6 +574,15 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
 
     // VR: the Rebuilt look at its real size, standing where the video began and looking where it first looked (the
     // room's middle when there's no camera path); the start card says how big the room is and how sure that is
+    const loadSurface = () => new PLYLoader().load(url.replace('/room.ply', '/room-surface.ply'), geometry => {
+      if (disposed || surface) return
+      surface = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
+      surface.visible = shown.current === 'solid'
+      surfaceMesh.current = surface
+      room.add(surface)
+      setHasSurface(true)
+    }, undefined, () => {})
+
     let vrSpot: { stand: THREE.Vector3; ahead: THREE.Vector3 } | null = null
     let vrAbout: string[] = ['This room, at its real size']
     const vr = makeVr(renderer, scene, {
@@ -516,18 +613,24 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
     refreshSplats.current = () => {
       spark.update({ scene, camera }).catch(() => {})
     }
-    const splats = new SplatMesh({ url: url.replace('/room.ply', '/room-splats.ply') })
-    splats.quaternion.set(1, 0, 0, 0)
-    splats.visible = false
+    let splats: SplatMesh | null = null
     let replaced = false // true once the room's movable pieces stand in for the single splat file
-    splats.initialized.then(() => {
-      if (disposed || replaced) return
-      splatMesh.current = splats
-      splats.visible = shown.current === 'real'
-      room.add(splats)
-      setHasSplats(true)
-      requestAnimationFrame(() => refreshSplats.current())
-    }, () => {})
+    // A headset's browser never loads them: it shows the Rebuilt look only, and they're 20 MB it has no memory to spare for
+    vrSupported().then(headset => {
+      if (disposed || headset) return
+      const loaded = new SplatMesh({ url: url.replace('/room.ply', '/room-splats.ply') })
+      splats = loaded
+      loaded.quaternion.set(1, 0, 0, 0)
+      loaded.visible = false
+      loaded.initialized.then(() => {
+        if (disposed || replaced) return
+        splatMesh.current = loaded
+        loaded.visible = shown.current === 'real'
+        room.add(loaded)
+        setHasSplats(true)
+        requestAnimationFrame(() => refreshSplats.current())
+      }, () => {})
+    })
 
     // Start where the video began, at the phone's own width of view: splats only look like the video from near where
     // it was filmed, and nothing on screen is then space the phone never saw from there
@@ -655,7 +758,10 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
           setHeld(name)
           setFit(fits ?? null)
         }, () => scaleRef.current, headset).then(rebuilt => {
-          if (!rebuilt) return
+          if (!rebuilt) {
+            if (!disposed) loadSurface() // its things aren't built yet: the solid surface is the best look there is
+            return
+          }
           if (disposed) {
             rebuilt.movable.dispose()
             return
@@ -669,15 +775,6 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
           overview.current = () => {
             const walls = shell
             if (!walls) return
-            // Where the video began, when the phone was looking down into the room; a first frame aimed level at a blank
-            // wall or up at the ceiling would be a bad first impression, so then a corner instead
-            if (vrSpot && vrSpot.ahead.y < -0.25) {
-              camera.position.copy(vrSpot.stand)
-              controls.target.copy(vrSpot.stand).addScaledVector(vrSpot.ahead, 0.01)
-              startSpot.current = vrSpot.stand.clone()
-              controls.update()
-              return
-            }
             walls.updateMatrixWorld(true)
             const { width, height, depth } = (walls.geometry as THREE.BoxGeometry).parameters
             const boxes = rebuilt.group.children.map(part => new THREE.Box3().setFromObject(part))
@@ -694,7 +791,7 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
             }
             if (!best) return
             camera.position.copy(best)
-            const middle = walls.position.clone().setY(0.45 / scaleRef.current)
+            const middle = walls.position.clone().setY(0.95 / scaleRef.current) // about desk height: the room, more than the floor
             controls.target.copy(best).addScaledVector(middle.sub(best).normalize(), 0.01)
             startSpot.current = best.clone()
             controls.update()
@@ -704,7 +801,7 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
         }, () => {})
       }
       // The room's things as movable pieces (the same splats, split by SAM 3.1), when the room has them
-      movableThings(assets, room, scene, camera, renderer.domElement, frame && found ? found : null, (name, fits) => {
+      if (!headset) movableThings(assets, room, scene, camera, renderer.domElement, frame && found ? found : null, (name, fits) => {
         setHeld(name)
         setFit(fits ?? null)
       }, () => refreshSplats.current(), () => scaleRef.current).then(pieces => {
@@ -715,8 +812,10 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
         }
         movable.current = pieces
         replaced = true
-        room.remove(splats)
-        splats.dispose()
+        if (splats) {
+          room.remove(splats)
+          splats.dispose()
+        }
         pieces.parts.visible = shown.current === 'real'
         room.add(pieces.parts)
         splatMesh.current = pieces.parts
@@ -744,6 +843,17 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
       // The spots the video was filmed from, upright, for the Real look: the ones COLMAP placed itself when the room
       // says which (the splats look like the video from there), else every one
       if (first?.fovY) setRealAspect(Math.tan(THREE.MathUtils.degToRad(first.fovX / 2)) / Math.tan(THREE.MathUtils.degToRad(first.fovY / 2)))
+      showFrame.current = frame => {
+        const spot = path?.find(item => item.frame === frame)
+        if (!spot) return
+        const [w, x, y, z] = spot.quaternion
+        const turn = room.quaternion.clone().multiply(new THREE.Quaternion(x, y, z, w))
+        const at = new THREE.Vector3(spot.position[0], spot.position[1], spot.position[2]).applyMatrix4(room.matrixWorld)
+        camera.position.copy(at)
+        controls.target.copy(at).add(new THREE.Vector3(0, 0, -0.01).applyQuaternion(turn))
+        startSpot.current = at.clone()
+        controls.update()
+      }
       const placed = path?.filter(spot => placedSpots?.placed?.includes(spot.frame))
       const steps = placed && placed.length > 1 ? placed : path
       if (steps && steps.length > 1) {
@@ -763,14 +873,7 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
     })
 
     // The solid surface sits next to the points; older rooms don't have one, and then the dots are all there is
-    new PLYLoader().load(url.replace('/room.ply', '/room-surface.ply'), geometry => {
-      if (disposed) return
-      surface = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
-      surface.visible = shown.current === 'solid'
-      surfaceMesh.current = surface
-      room.add(surface)
-      setHasSurface(true)
-    }, undefined, () => {})
+    if (DEBUG) loadSurface()
 
     // A hiccup on the way (a host's cold start, a dropped connection) shouldn't end the page, so it tries again first
     const loadRoom = (triesLeft: number) => new PLYLoader().load(url, geometry => {
@@ -944,7 +1047,7 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
         }
       })
       blocks.current = null
-      if (!replaced) splats.dispose()
+      if (!replaced) splats?.dispose()
       splatMesh.current = null
       refreshSplats.current = () => {}
       refitView.current = () => {}
@@ -953,71 +1056,170 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
     }
   }, [url])
 
+  const seeItReal = async () => {
+    setPictureError(null)
+    setPainting(true)
+    try {
+      const view = await grabView.current()
+      if (!view) throw new Error('That view couldn’t be read. Try again.')
+      const form = new FormData()
+      form.append('view', view.blob, 'view.jpg')
+      form.append('width', String(view.width))
+      form.append('height', String(view.height))
+      const response = await fetch(`${API_BASE}/api/imagine`, { method: 'POST', body: form })
+      const body = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(body?.message || `Something went wrong (${response.status}).`)
+      setSplit(62)
+      setPicture({ real: `data:image/png;base64,${body.image}`, rough: URL.createObjectURL(view.blob) })
+    } catch (problem) {
+      setPictureError(problem instanceof Error ? problem.message : String(problem))
+    } finally {
+      setPainting(false)
+    }
+  }
+
+  const panel = (which: 'things' | 'issues' | 'about') => {
+    setItemsOpen(which === 'things' && !itemsOpen)
+    setIssuesOpen(which === 'issues' && !issuesOpen)
+    setAboutOpen(which === 'about' && !aboutOpen)
+  }
+  const rebuiltLook = hasRebuilt && showing === 'rebuilt'
+  const canMove = (hasMovable && showing === 'real') || rebuiltLook
+  const dockItems: (DockItem | false)[] = [
+    { label: 'Before you sign', icon: <ShieldCheck />, active: issuesOpen, onClick: () => panel('issues') },
+    rebuiltLook && { label: 'Your things', icon: <Package />, active: itemsOpen, onClick: () => panel('things') },
+    LIVE && rebuiltLook && { label: painting ? 'Painting...' : 'See it real', icon: painting ? <Loader2 className="animate-spin motion-reduce:animate-none" /> : <Sparkles className="text-pink-300" />, disabled: painting, onClick: seeItReal },
+    {
+      label: inVr ? 'In VR' : canVr ? 'Enter VR' : 'VR on a Meta Quest', icon: <Glasses />, active: inVr || vrHint, disabled: inVr || (canVr && !hasRebuilt),
+      onClick: () => {
+        if (!canVr) return setVrHint(!vrHint)
+        setVrError(null)
+        vrRef.current?.enter().catch(() => setVrError("VR didn't start. Try again, or reload the page."))
+      },
+    },
+    canMove && {
+      label: 'Move things', icon: <Hand />, active: moving, separator: true,
+      onClick: () => {
+        const next = !moving
+        moveOn.current = next
+        ;(showing === 'rebuilt' ? rebuiltMovable.current : movable.current)?.setOn(next)
+        setMoving(next)
+        if (!next) setHeld(null)
+      },
+    },
+    rebuiltLook && hasMaterials && { label: 'Photo walls', icon: <Camera />, active: photoWalls, onClick: () => setPhotoWalls(!photoWalls) },
+    rebuiltLook && {
+      label: 'Not filmed', icon: <Eye />, active: notFilmed,
+      onClick: () => {
+        const next = !notFilmed
+        rebuiltTint.current?.(next)
+        setNotFilmed(next)
+      },
+    },
+    { label: 'About this room', icon: <Info />, active: aboutOpen, separator: true, onClick: () => panel('about') },
+  ]
+
   return (
-    <div className="relative h-[70vh] min-h-[420px] overflow-hidden rounded-xl bg-[#10161a]">
+    <div className="relative h-dvh w-full overflow-hidden bg-[#10161a]">
       <div ref={host} className="absolute inset-0"
         style={showing === 'real' && realAspect && realAspect < 1
           ? { inset: '0 auto 0 50%', translate: '-50% 0', height: '100%', aspectRatio: realAspect, maxWidth: '100%', overflow: 'hidden' }
           : undefined} />
-      <div className="pointer-events-none absolute left-3 top-3 z-10 flex max-w-[min(20rem,calc(100%-1.5rem))] flex-col gap-2 [&>button]:pointer-events-auto [&>form]:pointer-events-auto">
-      <div className="pointer-events-none rounded-lg bg-black/60 px-3 py-2 text-sm text-white">
-        {state === 'loading' && 'Loading the 3D room...'}
-        {state === 'error' && 'The 3D room could not be loaded. Reload the page to try again.'}
-        {state === 'ready' && moving && (
-          <span className="inline-flex items-center gap-1.5">
-            <Hand size={15} />
-            {held ? `Moving ${the(held)}. ${fitText(fit)}` : 'Tap or click a thing and drag it across the floor.'}
-          </span>
+
+      {/* The room's name and what's going on, top left */}
+      <div className="pointer-events-none absolute left-3 top-[4.5rem] z-10 flex max-w-[min(21rem,calc(100%-1.5rem))] flex-col gap-2 sm:top-20 [&>button]:pointer-events-auto [&>form]:pointer-events-auto">
+        <div className="glass-dark rounded-xl px-3 py-2 text-sm">
+          <p className="mb-1 truncate text-[10px] font-semibold uppercase tracking-[0.2em] text-[#fdf2ed]/90">{title}</p>
+          {state === 'loading' && (
+            <span className="inline-flex items-center gap-1.5">
+              <Loader2 size={15} className="animate-spin motion-reduce:animate-none" /> Loading the 3D room...
+            </span>
+          )}
+          {state === 'error' && 'The 3D room could not be loaded. Reload the page to try again.'}
+          {state === 'ready' && moving && (
+            <span className="inline-flex items-center gap-1.5">
+              <Hand size={15} className="shrink-0" />
+              {held ? `Moving ${the(held)}. ${fitText(fit)}` : 'Tap or click a thing and drag it across the floor.'}
+            </span>
+          )}
+          {state === 'ready' && !moving && notFilmed && showing === 'rebuilt' && (
+            <span className="inline-flex items-center gap-1.5">
+              <Eye size={15} className="shrink-0" />
+              Purple: what the video never saw, filled in by AI.
+            </span>
+          )}
+          {state === 'ready' && !moving && !(notFilmed && showing === 'rebuilt') && (
+            <span className="inline-flex items-center gap-1.5">
+              <Ruler size={15} className="shrink-0" />
+              {picked === 0 && 'Click or tap two points to measure.'}
+              {picked === 1 && 'Now the second point.'}
+              {picked === 2 && distance !== null && `${distance.toFixed(2)} m${roomSize ? `, give or take ${Math.max(1, Math.round(distance * 100 * roomSize.tolerance / 2))} cm` : ''}${toCeiling ? "; the ceiling's height is assumed" : ''}`}
+            </span>
+          )}
+          {vrError && <span className="mt-1 block text-xs text-red-300">{vrError}</span>}
+          {painting && (
+            <span className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
+              <Loader2 size={13} className="animate-spin motion-reduce:animate-none" /> Muse Image is painting this view (about 30 seconds).
+            </span>
+          )}
+          {pictureError && <span className="mt-1 block text-xs text-red-300">{pictureError}</span>}
+          {state === 'ready' && roomSize && picked === 0 && !moving && (
+            <span className="mt-1 block text-xs text-[#fdf2ed]/75">
+              Room about {roomSize.width.toFixed(2)} × {roomSize.length.toFixed(2)} m
+              {roomSize.heightAssumed
+                ? ` (the ceiling wasn't filmed: ${roomSize.height.toFixed(2)} m assumed)`
+                : `, ${roomSize.height.toFixed(2)} m tall`}; {roomSize.source}.
+            </span>
+          )}
+        </div>
+        {notice && (
+          <p className="glass-dark flex items-center gap-2 rounded-xl px-3 py-2 text-xs">
+            <Loader2 size={14} className="shrink-0 animate-spin motion-reduce:animate-none" /> {notice}
+          </p>
         )}
-        {state === 'ready' && !moving && notFilmed && showing === 'rebuilt' && (
-          <span className="inline-flex items-center gap-1.5">
-            <Eye size={15} />
-            Purple: what the video never saw, filled in by SAM 3D.
-          </span>
+        {state === 'ready' && picked === 2 && distance !== null && canResize && !moving && (
+          <form className="glass-dark rounded-xl px-3 py-2 text-xs"
+            onSubmit={event => {
+              event.preventDefault()
+              applyRealLength()
+            }}>
+            <p className="text-[#fdf2ed]/80">Measured it with a tape? Its real length sets the whole room's size:</p>
+            <div className="mt-1.5 flex items-center gap-1.5">
+              <input value={realCm} onChange={event => setRealCm(event.target.value)} inputMode="decimal" placeholder="74"
+                className="w-16 rounded bg-white/90 px-2 py-1 text-base text-slate-900 sm:text-xs" aria-label="Its real length in centimetres" />
+              <span>cm</span>
+              <button type="submit" disabled={scaleBusy}
+                className="rounded bg-cyan-300 px-2 py-1 font-medium text-slate-950 hover:bg-cyan-200 disabled:opacity-60">
+                {scaleBusy ? 'Resizing the room (about a minute)...' : 'Set the size'}
+              </button>
+            </div>
+            {scaleError && <p className="mt-1 text-red-300">{scaleError}</p>}
+          </form>
         )}
-        {state === 'ready' && !moving && !(notFilmed && showing === 'rebuilt') && (
-          <span className="inline-flex items-center gap-1.5">
-            <Ruler size={15} />
-            {picked === 0 && 'Click or tap two points to measure.'}
-            {picked === 1 && 'Now the second point.'}
-            {picked === 2 && distance !== null && `${distance.toFixed(2)} m${roomSize ? `, give or take ${Math.max(1, Math.round(distance * 100 * roomSize.tolerance / 2))} cm` : ''}${toCeiling ? "; the ceiling's height is assumed" : ''}`}
-          </span>
-        )}
-        {vrError && <span className="mt-1 block text-xs text-red-300">{vrError}</span>}
-        {state === 'ready' && roomSize && picked === 0 && !moving && (
-          <span className="mt-1 block text-xs text-white/80">
-            Room about {roomSize.width.toFixed(2)} × {roomSize.length.toFixed(2)} m
-            {roomSize.heightAssumed
-              ? ` (the ceiling wasn't filmed: ${roomSize.height.toFixed(2)} m assumed)`
-              : `, ${roomSize.height.toFixed(2)} m tall`}; {roomSize.source}.
-          </span>
+        {picked > 0 && (
+          <button type="button" onClick={() => clear.current()} className={`${TOOL} ${OFF} self-start`}>
+            <X size={14} /> Clear the measurement
+          </button>
         )}
       </div>
-      {state === 'ready' && picked === 2 && distance !== null && canResize && !moving && (
-        <form className="rounded-lg bg-black/60 px-3 py-2 text-xs text-white"
-          onSubmit={event => {
-            event.preventDefault()
-            applyRealLength()
-          }}>
-          <p className="text-white/80">Measured it with a tape? Its real length sets the whole room's size:</p>
-          <div className="mt-1.5 flex items-center gap-1.5">
-            <input value={realCm} onChange={event => setRealCm(event.target.value)} inputMode="decimal" placeholder="74"
-              className="w-16 rounded bg-white/90 px-2 py-1 text-base text-slate-900 sm:text-xs" aria-label="Its real length in centimetres" />
-            <span>cm</span>
-            <button type="submit" disabled={scaleBusy}
-              className="rounded bg-amber-500 px-2 py-1 font-medium text-black hover:bg-amber-400 disabled:opacity-60">
-              {scaleBusy ? 'Resizing the room (about a minute)...' : 'Set the size'}
+
+      {/* Which look, top right */}
+      {state === 'ready' && looks.length > 1 && (
+        <div className="absolute right-3 top-[4.5rem] z-10 flex gap-1 sm:top-20" role="group" aria-label="How the room looks">
+          {looks.map(option => (
+            <button key={option} type="button" onClick={() => setLook(option)} aria-pressed={showing === option} className="glass-chip rounded-lg">
+              {LABELS[option]}
             </button>
-          </div>
-          {scaleError && <p className="mt-1 text-red-300">{scaleError}</p>}
-        </form>
+          ))}
+          {showing === 'dots' && (
+            <label className="glass-chip flex items-center gap-2 rounded-lg">
+              Dot size
+              <input type="range" min={0.5} max={3} step={0.25} value={dots} onChange={e => setDots(Number(e.target.value))} className="w-20 accent-cyan-300" />
+            </label>
+          )}
+        </div>
       )}
-      {picked > 0 && (
-        <button type="button" onClick={() => clear.current()} className={`${TOOL} ${OFF} self-start`}>
-          <X size={14} /> Clear the measurement
-        </button>
-      )}
-      </div>
+
       {state === 'ready' && hasRebuilt && (
         <YourThings base={itemsBase} room={itemsBase.split('/').pop() ?? ''} scale={() => scaleRef.current}
           open={itemsOpen && showing === 'rebuilt'} onClose={() => setItemsOpen(false)} onReady={placeItem}
@@ -1026,171 +1228,111 @@ export default function RoomViewer({ url, canResize = !STATIC }: { url: string; 
             if (mesh) lookTowards.current(mesh.position.clone().setY(0.4 / scaleRef.current))
           }} />
       )}
-      {state === 'ready' && hasRebuilt && (
-        <Issues base={itemsBase} open={issuesOpen && showing === 'rebuilt'} onClose={() => setIssuesOpen(false)}
-          onReport={showIssues} room={roomSize} />
+      {state === 'ready' && (
+        <Issues base={itemsBase} roomId={itemsBase.split('/').pop() ?? ''} open={issuesOpen} stage={notice ?? null} codeAsked={codeAsked}
+          onClose={() => setIssuesOpen(false)} room={roomSize}
+          onReport={report => {
+            lastReport.current = report
+            showIssues(report)
+          }}
+          onShowFrame={frame => {
+            showFrame.current(frame)
+            if (window.innerWidth < 640) setIssuesOpen(false) // the panel covers the view on a phone
+          }} />
       )}
-      <div className="pointer-events-none absolute inset-x-3 bottom-3 z-10 flex flex-wrap items-end justify-between gap-2">
-      <p className="hidden min-w-0 max-w-[15rem] text-xs text-white/70 [text-shadow:0_1px_2px_rgb(0_0_0/0.6)] lg:block">
+      {aboutOpen && (
+        <div className="stage-panel">
+          <div className="mb-3 flex items-center justify-between">
+            <p className="inline-flex items-center gap-1.5 font-medium text-slate-900"><Info size={16} /> About this room</p>
+            <button type="button" onClick={() => setAboutOpen(false)} className="rounded p-1 hover:bg-slate-100" aria-label="Close">
+              <X size={16} />
+            </button>
+          </div>
+          {about}
+        </div>
+      )}
+
+      {/* What's in reach, along the bottom */}
+      <p className="pointer-events-none absolute bottom-5 left-4 z-10 hidden max-w-[14rem] text-xs text-white/70 [text-shadow:0_1px_2px_rgb(0_0_0/0.6)] xl:block">
         {showing === 'real' && spotCount > 1
           ? 'As filmed: step between the spots the video was filmed from (the arrows), and drag to look around.'
-          : 'Drag to look around, scroll to walk, right-drag to step sideways.'}
+          : 'Drag to look around. W A S D or scroll to walk.'}
       </p>
       {state === 'ready' && (
-        <div className="pointer-events-auto ml-auto flex flex-wrap items-center justify-end gap-2">
-          {hasRebuilt && showing === 'rebuilt' && (
-            <button
-              type="button"
-              onClick={() => {
-                setItemsOpen(!itemsOpen)
-                setIssuesOpen(false)
-              }}
-              aria-pressed={itemsOpen} className={`${TOOL} ${itemsOpen ? ON : OFF}`}
-            >
-              <Package size={14} /> Your things
-            </button>
+        <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex flex-col items-center gap-2 [&>*]:pointer-events-auto">
+          {vrHint && !canVr && (
+            <p className="glass-dark max-w-[calc(100vw-1.5rem)] rounded-xl px-3 py-2 text-center text-xs sm:max-w-md">
+              Stand in this room at its real size: open this page in a Meta Quest’s browser and press Enter VR. Left stick walks,
+              right stick turns, and the trigger measures between two spots.
+            </p>
           )}
-          {hasRebuilt && showing === 'rebuilt' && (
-            <button
-              type="button"
-              onClick={() => {
-                setIssuesOpen(!issuesOpen)
-                setItemsOpen(false)
-              }}
-              aria-pressed={issuesOpen} className={`${TOOL} ${issuesOpen ? ON : OFF}`}
-            >
-              <AlertTriangle size={14} /> Issues
-            </button>
-          )}
-          {showing === 'rebuilt' && (
-            <div className="flex overflow-hidden rounded-lg bg-black/60 text-white lg:hidden">
-              <button type="button" onClick={() => walkBy.current(0.3 / scaleRef.current)} className="px-3 py-2 hover:bg-black/40" aria-label="Walk forward">
-                <ArrowUp size={14} />
-              </button>
-              <button type="button" onClick={() => walkBy.current(-0.3 / scaleRef.current)} className="px-3 py-2 hover:bg-black/40" aria-label="Walk back">
-                <ArrowDown size={14} />
-              </button>
-            </div>
-          )}
-          {canVr && hasRebuilt && showing === 'rebuilt' && (
-            <button
-              type="button"
-              disabled={inVr}
-              onClick={() => {
-                setVrError(null)
-                vrRef.current?.enter().catch(() => setVrError("VR didn't start. Try again, or reload the page."))
-              }}
-              className={`${TOOL} bg-white text-slate-900 hover:bg-white/90 disabled:opacity-60`}
-            >
-              <Glasses size={14} /> {inVr ? 'In VR' : 'Enter VR'}
-            </button>
-          )}
-          {hasRebuilt && showing === 'rebuilt' && hasMaterials && (
-            <button
-              type="button"
-              onClick={() => setPhotoWalls(!photoWalls)}
-              aria-pressed={photoWalls} className={`${TOOL} ${photoWalls ? ON : OFF}`}
-            >
-              <Camera size={14} /> Photo walls
-            </button>
-          )}
-          {hasRebuilt && showing === 'rebuilt' && (
-            <button
-              type="button"
-              onClick={() => {
-                const next = !notFilmed
-                rebuiltTint.current?.(next)
-                setNotFilmed(next)
-              }}
-              aria-pressed={notFilmed} className={`${TOOL} ${notFilmed ? ON : OFF}`}
-            >
-              <Eye size={14} /> Not filmed
-            </button>
-          )}
-          {((hasMovable && showing === 'real') || (hasRebuilt && showing === 'rebuilt')) && (
-            <div className="flex overflow-hidden rounded-lg bg-black/60 text-xs text-white">
-              <button
-                type="button"
-                onClick={() => {
-                  const next = !moving
-                  moveOn.current = next
-                  ;(showing === 'rebuilt' ? rebuiltMovable.current : movable.current)?.setOn(next)
-                  setMoving(next)
-                  if (!next) setHeld(null)
-                }}
-                aria-pressed={moving} className={`inline-flex items-center gap-1.5 px-3 py-2 font-medium ${moving ? 'bg-amber-500 text-black' : 'hover:bg-black/40'}`}
-              >
-                <Hand size={14} /> Move things
-              </button>
-              {moving && held && showing === 'rebuilt' && (
+          {moving && (held || showing === 'rebuilt') && (
+            <div className="glass-dark flex overflow-hidden rounded-xl text-xs">
+              {held && showing === 'rebuilt' && (
                 <>
-                  <button type="button" onClick={() => rebuiltMovable.current?.turn(15)}
-                    className="px-2 py-2 hover:bg-black/40" aria-label="Turn anticlockwise" title="Turn 15° anticlockwise">
+                  <button type="button" onClick={() => rebuiltMovable.current?.turn(15)} className="px-2.5 py-2 hover:bg-white/10" aria-label="Turn anticlockwise" title="Turn 15° anticlockwise">
                     <RotateCcw size={14} />
                   </button>
-                  <button type="button" onClick={() => rebuiltMovable.current?.turn(-15)}
-                    className="px-2 py-2 hover:bg-black/40" aria-label="Turn clockwise" title="Turn 15° clockwise">
+                  <button type="button" onClick={() => rebuiltMovable.current?.turn(-15)} className="px-2.5 py-2 hover:bg-white/10" aria-label="Turn clockwise" title="Turn 15° clockwise">
                     <RotateCw size={14} />
                   </button>
                 </>
               )}
-              {moving && (
-                <button
-                  type="button"
-                  onClick={() => (showing === 'rebuilt' ? rebuiltMovable.current : movable.current)?.reset()}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 hover:bg-black/40"
-                >
-                  <Undo2 size={14} /> Put back
-                </button>
-              )}
+              <button type="button" onClick={() => (showing === 'rebuilt' ? rebuiltMovable.current : movable.current)?.reset()} className="inline-flex items-center gap-1.5 px-3 py-2 hover:bg-white/10">
+                <Undo2 size={14} /> Put back
+              </button>
             </div>
           )}
           {showing === 'real' && spotCount > 1 && (
-            <div className="flex items-center overflow-hidden rounded-lg bg-black/60 text-xs text-white">
-              <button type="button" onClick={() => goSpot(spot - 1)} disabled={spot === 0}
-                className="px-2 py-2 hover:bg-black/40 disabled:opacity-40" aria-label="The spot before" title="The spot before (←)">
+            <div className="glass-dark flex items-center overflow-hidden rounded-xl text-xs">
+              <button type="button" onClick={() => goSpot(spot - 1)} disabled={spot === 0} className="px-2.5 py-2 hover:bg-white/10 disabled:opacity-40" aria-label="The spot before" title="The spot before (←)">
                 <ChevronLeft size={14} />
               </button>
-              <input type="range" min={0} max={spotCount - 1} value={spot} onChange={e => goSpot(Number(e.target.value))}
-                className="w-24 accent-amber-500" aria-label="Filmed spot" />
+              <input type="range" min={0} max={spotCount - 1} value={spot} onChange={e => goSpot(Number(e.target.value))} className="w-28 accent-cyan-300" aria-label="Filmed spot" />
               <span className="px-2 tabular-nums">{spot + 1} / {spotCount}</span>
-              <button type="button" onClick={() => goSpot(spot + 1)} disabled={spot === spotCount - 1}
-                className="px-2 py-2 hover:bg-black/40 disabled:opacity-40" aria-label="The next spot" title="The next spot (→)">
+              <button type="button" onClick={() => goSpot(spot + 1)} disabled={spot === spotCount - 1} className="px-2.5 py-2 hover:bg-white/10 disabled:opacity-40" aria-label="The next spot" title="The next spot (→)">
                 <ChevronRight size={14} />
               </button>
             </div>
           )}
-          {looks.length > 1 && (
-            <div className="flex overflow-hidden rounded-lg bg-black/60 text-xs text-white">
-              {looks.map(option => (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => setLook(option)}
-                  aria-pressed={showing === option} className={`px-3 py-2 font-medium ${showing === option ? 'bg-amber-500 text-black' : 'hover:bg-black/40'}`}
-                >
-                  {LABELS[option]}
-                </button>
-              ))}
+          {showing === 'rebuilt' && !issuesOpen && !aboutOpen && !itemsOpen && (
+            <div className="glass-dark flex overflow-hidden rounded-xl [@media(hover:hover)]:hidden">
+              <button type="button" onClick={() => walkBy.current(0.3 / scaleRef.current)} className="px-3 py-2" aria-label="Walk forward"><ArrowUp size={14} /></button>
+              <button type="button" onClick={() => walkBy.current(-0.3 / scaleRef.current)} className="px-3 py-2" aria-label="Walk back"><ArrowDown size={14} /></button>
             </div>
           )}
-          {showing === 'dots' && (
-            <label className="flex items-center gap-2 rounded-lg bg-black/60 px-3 py-2 text-xs text-white">
-              Dot size
-              <input
-                type="range"
-                min={0.5}
-                max={3}
-                step={0.25}
-                value={dots}
-                onChange={e => setDots(Number(e.target.value))}
-                className="w-28 accent-amber-500"
-              />
-            </label>
-          )}
+          <Dock items={dockItems.filter((item): item is DockItem => Boolean(item))} />
         </div>
       )}
-      </div>
+
+      {picture && (
+        <div className="absolute inset-0 z-30 select-none overflow-hidden bg-black">
+          <img src={picture.rough} alt="The 3D room from this view" className="absolute inset-0 h-full w-full" />
+          <img src={picture.real} alt="Muse Image's picture of this view" className="absolute inset-0 h-full w-full"
+            style={{ clipPath: `inset(0 ${100 - split}% 0 0)` }} />
+          <div className="pointer-events-none absolute inset-y-0 w-0.5 bg-white shadow-[0_0_8px_rgb(0_0_0/0.5)]" style={{ left: `${split}%` }}>
+            <span className="absolute left-1/2 top-1/2 grid h-8 w-8 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full bg-white text-slate-900 shadow-lg">
+              <ChevronsLeftRight size={16} />
+            </span>
+          </div>
+          <input type="range" min={0} max={100} value={split} onChange={event => setSplit(Number(event.target.value))}
+            aria-label="Slide between Muse Image's picture and the 3D room" className="absolute inset-0 h-full w-full cursor-ew-resize opacity-0" />
+          <span className="glass-dark pointer-events-none absolute bottom-3 left-3 rounded-lg px-2 py-1 text-xs font-medium">AI picture</span>
+          <span className="glass-dark pointer-events-none absolute bottom-3 right-3 rounded-lg px-2 py-1 text-xs font-medium">The 3D room</span>
+          <div className="pointer-events-none absolute inset-x-3 top-[4.5rem] flex items-start justify-between gap-3 sm:top-20">
+            <p className="glass-dark max-w-md rounded-lg px-3 py-2 text-xs">
+              Muse Image’s picture of this view, with everything left where it stands. It’s for the feel of the room, so no
+              check or measurement ever uses it. Those all come from the 3D room.
+            </p>
+            <button type="button" onClick={() => {
+              URL.revokeObjectURL(picture.rough)
+              setPicture(null)
+            }} className={`${TOOL} ${OFF} pointer-events-auto relative shrink-0`}>
+              <X size={14} /> Back to the 3D room
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

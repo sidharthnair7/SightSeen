@@ -86,8 +86,8 @@ def find(out):
         answer = _spark(pictures, ISSUES.format(n=len(pictures)), key)
         try:
             listed = json.loads(answer[answer.index("["): answer.rindex("]") + 1])
-        except ValueError:
-            listed = []
+        except ValueError as error:  # not an answer: the step fails, and the page says this check didn't finish
+            raise RuntimeError("Muse Spark's list of damage couldn't be read") from error
         listed_file.write_text(json.dumps(listed, indent=2))
     listed = [item for item in listed if isinstance(item, dict) and str(item.get("name", "")).strip()][:MOST_CANDIDATES]
 

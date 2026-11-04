@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { CheckCircle2 } from 'lucide-react'
+import { CheckCircle2, KeyRound } from 'lucide-react'
 import { API_BASE, api, uploadVideo } from '../api'
 import Recorder from '../components/Recorder'
+import SiteNav from '../components/SiteNav'
 import VideoPicker from '../components/VideoPicker'
 import { filmingSteps } from '../instructions'
 import type { FilmView } from '../types'
@@ -34,35 +35,52 @@ export default function Film({ token }: { token: string }) {
 
   if (!view) {
     return (
-      <main className="mx-auto max-w-xl px-4 py-12">
-        <p className={error ? 'text-red-700' : 'text-slate-600'}>{error ?? 'Loading...'}</p>
-      </main>
+      <>
+        <SiteNav activeHref="" items={[{ label: 'What is SightSeen?', href: '/' }]} />
+        <main className="mx-auto max-w-xl px-4 pb-12 pt-24">
+          <p className={error ? 'text-red-700' : 'text-slate-600'}>{error ?? 'Loading...'}</p>
+        </main>
+      </>
     )
   }
 
   return (
-    <main className="mx-auto max-w-xl px-4 py-12">
-      <p className="text-sm font-medium text-teal-700">SightSeen</p>
-      <h1 className="mt-1 text-2xl font-semibold tracking-tight">Film the room: {view.label}</h1>
+    <>
+    <SiteNav activeHref="" items={[{ label: 'What is SightSeen?', href: '/' }]} />
+    <main className="mx-auto max-w-xl px-4 pb-12 pt-24">
+      <h1 className="text-2xl font-semibold tracking-tight text-slate-950">Film the room: {view.label}</h1>
       <p className="mt-2 text-slate-600">
         A student asked to see this room before signing. Your video becomes a 3D room they can look around and
         measure. There's no account and nothing to install.
       </p>
 
-      <h2 className="mt-8 font-medium">How to film it</h2>
+      {view.code && (
+        <section className="mt-6 flex items-start gap-3 rounded-2xl border border-sky-300/60 bg-white p-4 shadow-sm">
+          <KeyRound className="mt-0.5 shrink-0 text-sky-600" size={20} />
+          <div>
+            <p className="font-medium text-slate-950">Your one-time code: <span className="text-2xl font-bold tabular-nums tracking-wider">{view.code}</span></p>
+            <p className="mt-1 text-sm text-slate-600">
+              Write it on a piece of paper, in big numbers. When you start filming, hold it up to the camera for about 3
+              seconds, with the room behind it. That's how the student knows this video was filmed now, in this room.
+            </p>
+          </div>
+        </section>
+      )}
+
+      <h2 className="mt-8 font-medium text-slate-950">How to film it</h2>
       <ol className="mt-3 list-decimal space-y-2 pl-5 text-slate-700">
         {filmingSteps.map(step => <li key={step}>{step}</li>)}
       </ol>
 
       <div className="mt-8">
         {sent ? (
-          <div className="flex items-start gap-3 rounded-lg bg-teal-50 p-4 text-teal-900">
+          <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-900">
             <CheckCircle2 className="mt-0.5 shrink-0" size={20} />
             <p>Thanks, it's sent. The student will see the room soon. If they ask for another take, use this same link.</p>
           </div>
         ) : (
           <>
-            <Recorder sending={progress} onSend={file => send(file, true)} />
+            <Recorder code={view.code} sending={progress} onSend={file => send(file, true)} />
             <div className="mt-6 border-t border-slate-200 pt-4">
               <p className="mb-2 text-sm text-slate-600">Already filmed it? Send that video instead.</p>
               <VideoPicker label="Choose a video" progress={progress} onPick={send} />
@@ -75,5 +93,6 @@ export default function Film({ token }: { token: string }) {
         {error && <p className="mt-3 text-sm text-red-700">{error}</p>}
       </div>
     </main>
+    </>
   )
 }

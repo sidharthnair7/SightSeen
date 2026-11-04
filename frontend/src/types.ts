@@ -25,6 +25,8 @@ export interface RoomRequest {
   model: string | null
   room: Room | null
   failureMessage: string | null
+  /** The one-time code the landlord holds up on camera (hosted rooms) */
+  code?: string
 }
 
 /** All the landlord's page gets. */
@@ -33,4 +35,6 @@ export interface FilmView {
   videoReceived: boolean
   /** The hosted pipeline: a video is being built into a room right now */
   building?: boolean
+  /** The one-time code to hold up on camera (hosted rooms) */
+  code?: string
 }

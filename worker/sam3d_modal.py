@@ -19,7 +19,7 @@ import modal
 COMMIT = "f91db411c50efee93d8db7aeb323885650f6f722"  # sam-3d-objects, Jun 2 2026
 # 48 GB, enough for SAM 3D's 32 and cheaper than an A100. Modal runs no GPU at all without a card on file, so
 # SIGHTSEEN_SAM3D_GPU="" leaves the app GPU-less, which is enough for check()
-GPU = os.environ.get("SIGHTSEEN_SAM3D_GPU", "L40S") or None
+GPU = os.environ.get("SIGHTSEEN_SAM3D_GPU", "L40S,A100,H100").split(",") if os.environ.get("SIGHTSEEN_SAM3D_GPU", "L40S") else None  # in order, if one runs out
 KAOLIN = "https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu121.html"
 
 app = modal.App("sightseen-sam3d")

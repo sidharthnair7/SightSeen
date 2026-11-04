@@ -1,4 +1,3 @@
-// DRAFT from the Oct 30 research, for Sid to rewrite in his own words (his call: the landlord films "in a specific way").
 // Why each step is here: the floor tells SightSeen which way is up; a whole door is the ruler phase 3 needs (UniMetric
 // uses an object's full height); and blurry frames are the ones the research says get thrown out.
 export const filmingSteps = [

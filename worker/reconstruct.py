@@ -32,6 +32,7 @@ import json
 import math
 import os
 import shutil
+import sys
 import subprocess
 import time
 import traceback
@@ -424,6 +425,10 @@ def _seen_lens(lens, seen, original):
                      [0, 0, 1]], dtype=np.float32)
 
 
+COLMAP_MAPPING_LIMIT = 300  # seconds it gets to place the cameras
+MAP_MODELS = "import pycolmap, sys; pycolmap.incremental_mapping(sys.argv[1], sys.argv[2], sys.argv[3])"
+
+
 def _solve_cameras(frames, indices, folder):
     """COLMAP on the frames: small features found in each frame and matched across every pair, then every camera solved
     together (incremental structure from motion), all with one lens since it's one phone. Returns COLMAP's biggest
@@ -443,12 +448,23 @@ def _solve_cameras(frames, indices, folder):
                               camera_mode=pycolmap.CameraMode.SINGLE, reader_options=reader,
                               extraction_options=extraction)
     pycolmap.match_exhaustive(database)
-    models = pycolmap.incremental_mapping(database, images, folder / "model")
+    # In its own process, on a clock: a hard video (a slow slider, blank walls) can keep COLMAP restarting its model for half
+    # an hour, and MapAnything's cameras are a fine backup, so no room should wait on it or die with it
+    mapping = subprocess.Popen([sys.executable, "-c", MAP_MODELS, str(database), str(images), str(folder / "model")])
+    try:
+        mapping.wait(timeout=COLMAP_MAPPING_LIMIT)
+    except subprocess.TimeoutExpired:
+        mapping.kill()
+        mapping.wait()
+        shutil.rmtree(folder / "model", ignore_errors=True)
+        raise TimeoutError(f"COLMAP was still placing cameras after {COLMAP_MAPPING_LIMIT} s") from None
     try:
         database.unlink()  # the matches: tens of MB nobody reads again
     except OSError:
         pass
-    return max(models.values(), key=lambda model: model.num_reg_images()) if models else None
+    models = [pycolmap.Reconstruction(str(path)) for path in (folder / "model").iterdir()
+              if path.is_dir() and any(path.glob("cameras.*"))]
+    return max(models, key=lambda model: model.num_reg_images()) if models else None
 
 
 def _use_colmap(room, model, frames):

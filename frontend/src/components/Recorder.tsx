@@ -7,6 +7,7 @@ import { beforeFilming, coachSteps } from '../instructions'
 const TOO_FAST = 30
 const LONGEST = 180 // seconds: the recording stops itself here, so a forgotten phone doesn't fill the upload
 const BITRATE = 8_000_000 // about 120 MB for two minutes: plenty of detail at 1080p
+const CODE_SECONDS = 6 // the coach waits this long for the landlord to hold up the one-time code
 
 type Stage = 'ready' | 'recording' | 'review' | 'unsupported' | 'error'
 
@@ -24,7 +25,7 @@ function bestType() {
  * wall from the doorway and from the middle, and warns when they turn too fast. When they stop, they see what they
  * got and send it with the same upload as before.
  */
-export default function Recorder({ onSend, sending }: { onSend: (file: File) => void; sending: number | null }) {
+export default function Recorder({ code, onSend, sending }: { code?: string; onSend: (file: File) => void; sending: number | null }) {
   const supported = typeof window !== 'undefined' && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia
     && typeof MediaRecorder !== 'undefined'
   const [stage, setStage] = useState<Stage>(supported ? 'ready' : 'unsupported')
@@ -134,7 +135,7 @@ export default function Recorder({ onSend, sending }: { onSend: (file: File) => 
           <button
             type="button"
             onClick={start}
-            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-3 font-medium text-white hover:bg-red-700"
+            className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-3 font-medium text-white transition-[scale,background-color] duration-150 ease-out hover:bg-red-700 enabled:active:scale-[0.96] motion-reduce:transition-none"
           >
             <Circle size={18} fill="currentColor" /> Start filming
           </button>
@@ -147,7 +148,9 @@ export default function Recorder({ onSend, sending }: { onSend: (file: File) => 
           <span className="inline-flex items-center gap-2"><Circle size={10} fill="#ef4444" className="text-red-500" /> {minutes}</span>
           {size && <span className="text-white/70">{size}</span>}
         </div>
-        <p className="absolute inset-x-0 bottom-14 mx-3 rounded-lg bg-black/60 px-3 py-2 text-center text-white">{step.say}</p>
+        <p className="absolute inset-x-0 bottom-14 mx-3 rounded-lg bg-black/60 px-3 py-2 text-center text-white">
+          {code && seconds < CODE_SECONDS ? <>Hold up your code first: <span className="font-bold tabular-nums">{code}</span></> : step.say}
+        </p>
         {tooFast && (
           <p className="absolute inset-x-0 top-12 mx-auto w-fit rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-black">
             <TriangleAlert size={15} className="mr-1 inline" /> Turn slower
@@ -163,7 +166,7 @@ export default function Recorder({ onSend, sending }: { onSend: (file: File) => 
       </div>
 
       {stage === 'review' && file && (
-        <div className="space-y-3 rounded-lg bg-slate-50 p-4">
+        <div className="space-y-3 rounded-xl border border-slate-900/10 bg-white p-4">
           <p className="text-slate-700">
             {minutes} of video{size ? ` at ${size}` : ''}, {(file.size / 1e6).toFixed(0)} MB.
             {seconds < 60 && ' That might be too short to see every wall; you can film again.'}
@@ -173,7 +176,7 @@ export default function Recorder({ onSend, sending }: { onSend: (file: File) => 
               type="button"
               disabled={sending !== null}
               onClick={() => onSend(file)}
-              className="inline-flex items-center gap-2 rounded-lg bg-teal-700 px-4 py-2 font-medium text-white hover:bg-teal-800 disabled:opacity-60"
+              className="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-cyan-300 via-sky-400 to-pink-400 text-slate-950 px-4 py-2 font-semibold transition-[scale,filter] duration-150 ease-out hover:brightness-105 enabled:active:scale-[0.96] motion-reduce:transition-none disabled:opacity-60"
             >
               <Send size={16} /> {sending !== null ? `Sending ${Math.round(sending * 100)}%` : 'Send this video'}
             </button>

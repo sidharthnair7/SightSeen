@@ -34,8 +34,9 @@ import modal
 app = modal.App("sightseen")
 WORKER = Path(__file__).resolve().parent
 # Modal won't start an app with GPU functions until there's a card on file, so SIGHTSEEN_GPU="" leaves it GPU-less,
-# which is enough for check() (`modal run modal_app.py` with no video)
-GPU = os.environ.get("SIGHTSEEN_GPU", "L4") or None
+# which is enough for check() (`modal run modal_app.py` with no video). A list, cheapest first: on a busy day Modal can run
+# out of one type (Nov 4: L4s, for 7 minutes), and a visitor shouldn't wait for it while another type is free
+GPU = os.environ.get("SIGHTSEEN_GPU", "L4,A10,L40S").split(",") if os.environ.get("SIGHTSEEN_GPU", "L4") else None
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -53,7 +54,7 @@ image = (
     # the pipeline's Python only: not Brush (vendor/, this PC's splat trainer, whose caches change while it runs)
     .add_local_dir(WORKER, "/root/worker", ignore=[".venv", "vendor", "target", "**/__pycache__", "*.pyc", "*.log"])
 )
-web_image = modal.Image.debian_slim(python_version="3.12").pip_install("fastapi", "python-multipart")
+web_image = modal.Image.debian_slim(python_version="3.12").pip_install("fastapi", "python-multipart", "requests")
 
 # MapAnything's 4.9 GB checkpoint is downloaded into this volume once and reused by every later run
 models = modal.Volume.from_name("sightseen-models", create_if_missing=True)
@@ -121,11 +122,26 @@ def finish_room(request_id: str):
         rooms.commit()
         record = state.get(f"request:{request_id}") or {}
         _update(request_id, status="READY", room={**(record.get("room") or {}), "version": int(time.time())},
-                stage="rebuilding the room's things in 3D (a few minutes; the page updates when they're in)")
+                stage="rebuilding the room's things in 3D (about 15 minutes; the page updates when they're in)")
+
+    # One at a time on a room: a second run would pay for SAM 3D twice and write over the first
+    busy = f"finishing:{request_id}"
+    if time.time() - (state.get(busy) or 0) < 3000:
+        print("already finishing", request_id)
+        return
+    state[busy] = time.time()
+    # Only the landlord's link asks for the code: a video the student uploaded isn't blamed for not having it
+    record = state.get(f"request:{request_id}") or {}
+    code = record.get("code") if record.get("videoSource") == "LANDLORD_LINK" else None
+
+    def stage(text):  # what's finished so far reaches the page as soon as the next step starts
+        rooms.commit()
+        _update(request_id, stage=text)
 
     try:
-        pipeline.finish(out, runner="modal", stage=lambda text: _update(request_id, stage=text), walls_done=walls_done)
+        pipeline.finish(out, runner="modal", stage=stage, walls_done=walls_done, code=code)
     finally:
+        state[busy] = 0
         rooms.commit()
         record = state.get(f"request:{request_id}") or {}
         _update(request_id, status="READY", stage=None, room={**(record.get("room") or {}), "version": int(time.time())})
@@ -154,6 +170,7 @@ def set_room_scale(request_id: str, units: float, metres: float) -> dict:
 
 VISITORS = Path("/rooms/visitors")  # a visitor's own things: items/<id>/, each theirs, kept apart from any room
 VISITORS_IN_VOLUME = "/visitors/items"  # the same place, as the web app names it (it doesn't mount the volume)
+AD_CHECKS = "visitors/ad-checks"  # a visitor's ad photos and their results, one folder a check
 
 
 @app.function(image=image, cpu=2, memory=8192, volumes={"/rooms": rooms}, secrets=[_keys()], timeout=1500)
@@ -171,10 +188,40 @@ def build_visitor_item(item_id: str):
     rooms.reload()
     try:
         meta = items.build_item(VISITORS, item_id)
+        if meta.get("status") == "done":  # light enough for a browser, and lighter for a headset
+            import export_static
+            import pipeline
+
+            model = VISITORS / "items" / item_id / "item.ply"
+            export_static.headset_copies([model], export_static.VR_THING)
+            export_static._thin(model, model.with_name("thin-item.ply"), pipeline.HOSTED_TRIANGLES)
+            model.with_name("thin-item.ply").replace(model)
         rooms.commit()
     except Exception:  # noqa: BLE001 - the page says so instead of spinning
         meta = {**(state.get(f"item:{item_id}") or {}), "status": "failed", "why": "The build stopped. Try it again."}
     state[f"item:{item_id}"] = meta
+
+
+@app.function(image=image, cpu=8, memory=8192, volumes={"/rooms": rooms}, secrets=[_keys()], timeout=600)
+def check_ad_photos(check_id: str, request_id: str):
+    """worker/room_trust.py on a visitor's ad photos, against a room's frames."""
+    sys.path.insert(0, "/root/worker")
+    import room_trust
+
+    rooms.reload()
+    folder = Path("/rooms") / AD_CHECKS / check_id
+    record = state.get(f"adcheck:{check_id}") or {}
+
+    def stage(text):
+        state[f"adcheck:{check_id}"] = {**record, "stage": text}
+
+    try:
+        results = room_trust.check_ad(Path("/rooms") / request_id / "frames", sorted(folder.glob("photo-*")), folder, stage=stage)
+        rooms.commit()
+        state[f"adcheck:{check_id}"] = {**record, "status": "done", "stage": None, "results": results}
+    except Exception as error:  # noqa: BLE001 - the page says so instead of spinning
+        print("ad check failed:", error)
+        state[f"adcheck:{check_id}"] = {**record, "status": "failed", "stage": None, "why": "The check stopped. Try again."}
 
 
 def _within_today(kind: str, most: int) -> bool:
@@ -187,14 +234,20 @@ def _within_today(kind: str, most: int) -> bool:
     return True
 
 
-ROOMS_A_DAY, THINGS_A_DAY = 25, 60
+ROOMS_A_DAY, THINGS_A_DAY, AD_CHECKS_A_DAY, PICTURES_A_DAY = 8, 40, 80, 150
 BIGGEST_VIDEO, BIGGEST_PHOTO = 800 * 1024 * 1024, 25 * 1024 * 1024
+PIECE = 256 * 1024  # bytes a file is streamed in
 PHOTO_TYPES = (".jpg", ".jpeg", ".png", ".webp")
+SEE_IT_REAL = (
+    "This is a rough 3D model of a real rented room, seen from inside it. Turn it into a realistic photograph taken from "
+    "exactly this viewpoint. Keep every object exactly where it is, with the same size, shape and colour, and keep the "
+    "walls, floor, window and door where they are. Do not add, remove or move anything. Only make the surfaces look real: "
+    "clean up blurred textures and holes, and give it natural indoor light.")
 SAFE_FILE = re.compile(r"[a-z0-9][a-z0-9.-]*\.(json|png|jpg|ply)")
 VIDEO_TYPES = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
 
 
-@app.function(image=web_image, timeout=900)
+@app.function(image=web_image, secrets=[_keys()], timeout=900, cpu=2.0, memory=2048, scaledown_window=300)
 @modal.concurrent(max_inputs=40)
 @modal.asgi_app()
 def web():
@@ -205,6 +258,7 @@ def web():
     It reads and writes the rooms volume directly (read_file, batch_upload) and doesn't mount it: other containers
     write the rooms, so a mounted copy would need reloading, and a reload makes files vanish for a moment for every
     other request in the container."""
+    import itertools
     import mimetypes
     import uuid
 
@@ -236,9 +290,10 @@ def web():
         except Exception:  # noqa: BLE001 - a hiccup in the volume: an answer the page can read, not a bare 500
             return fail(503, "That file couldn't be read just now. Try again.")
 
-        def rest():
-            yield first
-            yield from chunks
+        def rest():  # in small pieces: one huge piece per file holds up the others on the way through Modal's gateway
+            for chunk in itertools.chain([first], chunks):
+                for start in range(0, len(chunk), PIECE):
+                    yield chunk[start:start + PIECE]
 
         kind = mimetypes.guess_type(path)[0] or "application/octet-stream"
         return StreamingResponse(rest(), media_type=kind, headers={"Cache-Control": "no-cache"})
@@ -256,7 +311,8 @@ def web():
         return {"id": record["id"], "label": record["label"], "status": record["status"], "stage": record.get("stage"),
                 "landlordPath": f"/film/{record['token']}", "roomPath": f"/room/{record['id']}",
                 "createdAt": record["createdAt"], "videoSource": record.get("videoSource"), "model": "apache",
-                "room": room, "failureMessage": record.get("failureMessage"), "scaleState": record.get("scaleState")}
+                "room": room, "failureMessage": record.get("failureMessage"), "scaleState": record.get("scaleState"),
+                "code": record.get("code")}
 
     def receive(request_id, video, source, live):
         """Saves the video next to the room, marks how it came in, and starts the GPU."""
@@ -267,11 +323,13 @@ def web():
             return fail(413, "That video is over 800 MB. A slow two-minute walk round the room is plenty.")
         if not _within_today("rooms", ROOMS_A_DAY):
             return fail(429, "The demo has built all the rooms it can today. Try the sample room, or come back tomorrow.")
-        # A video replacing an earlier one: that one may be of another type, and may have been filmed live
+        # A video replacing an earlier one: that one may be of another type, and may have been filmed live, and nothing
+        # worked out from it may stand for this one (not its answers, not its reports)
         if (record_of(request_id) or {}).get("videoSource"):
-            for old in [f"video{other}" for other in VIDEO_TYPES if other != ext] + ["video-live.json"]:
+            for old in [f"video{other}" for other in VIDEO_TYPES if other != ext] + [
+                    "video-live.json", "room-trust.json", "room-issues.json", "room-things.json", "presence-code.jpg", "things"]:
                 try:
-                    rooms.remove_file(f"/{request_id}/{old}")
+                    rooms.remove_file(f"/{request_id}/{old}", recursive=old == "things")
                 except Exception:  # noqa: BLE001 - it wasn't there
                     pass
         with rooms.batch_upload(force=True) as batch:
@@ -291,7 +349,9 @@ def web():
             return fail(400, "Say which place it is.")
         request_id = str(uuid.uuid4())
         token = secrets.token_urlsafe(9).replace("_", "x").replace("-", "y")
-        record = {"id": request_id, "label": label, "token": token, "status": "WAITING_FOR_VIDEO",
+        # The one-time code the landlord holds up on camera (room_trust.py): an old tour can't have it in it
+        code = str(1000 + secrets.randbelow(9000))
+        record = {"id": request_id, "label": label, "token": token, "status": "WAITING_FOR_VIDEO", "code": code,
                   "createdAt": datetime.now(timezone.utc).isoformat()}
         state[f"request:{request_id}"] = record
         state[f"token:{token}"] = request_id
@@ -308,6 +368,8 @@ def web():
         record = record_of(request_id)
         if not record:
             return fail(404, "No request with that link.")
+        if record.get("locked"):
+            return fail(403, "This is the sample room, so it can't be changed. Start your own.")
         if record["status"] in ("VIDEO_RECEIVED", "RECONSTRUCTING"):
             return fail(409, "A video is already being built into a room. Wait for it to finish.")
         done = receive(request_id, video, "STUDENT_UPLOAD", False)
@@ -320,7 +382,7 @@ def web():
         if not record:
             return fail(404, "This link doesn't lead anywhere. Ask the student for a new one.")
         return {"label": record["label"], "videoReceived": record["status"] != "WAITING_FOR_VIDEO",
-                "building": record["status"] in ("VIDEO_RECEIVED", "RECONSTRUCTING")}
+                "building": record["status"] in ("VIDEO_RECEIVED", "RECONSTRUCTING"), "code": record.get("code")}
 
     @api.post("/api/film/{token}/video")
     def film_upload(token: str, live: bool = False, video: UploadFile = File(...)):
@@ -335,8 +397,11 @@ def web():
 
     @api.post("/api/requests/{request_id}/scale")
     def scale(request_id: str, body: Length):
-        if not record_of(request_id):
+        record = record_of(request_id)
+        if not record:
             return fail(404, "No request with that link.")
+        if record.get("locked"):
+            return fail(403, "This is the sample room, so it can't be changed. Start your own.")
         if not body.units > 0 or not 0.05 <= body.metres <= 20:
             return fail(400, "Give a real length between 5 cm and 20 m.")
         # It works on after answering: Modal cuts a request off at 150 s. The page checks scaleState.
@@ -377,11 +442,70 @@ def web():
         meta = state.get(f"item:{item_id}") if re.fullmatch(r"[0-9a-f]{12}", item_id) else None
         return meta or fail(404, "That thing isn't here any more.")
 
-    @api.get("/api/items/{item_id}/item.ply")
-    def item_model(item_id: str):
-        if not re.fullmatch(r"[0-9a-f]{12}", item_id):
+    @api.get("/api/items/{item_id}/{name}")
+    def item_model(item_id: str, name: str):
+        if not re.fullmatch(r"[0-9a-f]{12}", item_id) or name not in ("item.ply", "vr-item.ply"):
             return fail(404, "That thing isn't built yet.")
-        return stored(f"{VISITORS_IN_VOLUME}/{item_id}/item.ply", "That thing isn't built yet.")
+        return stored(f"{VISITORS_IN_VOLUME}/{item_id}/{name}", "That thing isn't built yet.")
+
+    @api.post("/api/requests/{request_id}/ad-check")
+    def start_ad_check(request_id: str, photos: list[UploadFile] = File(...)):
+        record = record_of(request_id)
+        if not record or record["status"] != "READY":
+            return fail(400, "This room isn't ready to compare yet.")
+        if not 1 <= len(photos) <= 5:
+            return fail(400, "Add between one and five photos from the ad.")
+        for photo in photos:
+            if Path(photo.filename or "").suffix.lower() not in PHOTO_TYPES:
+                return fail(400, "That isn't a photo this can read: use a JPG or PNG.")
+            if (photo.size or 0) > BIGGEST_PHOTO:
+                return fail(413, "That photo is over 25 MB.")
+        if not _within_today("ads", AD_CHECKS_A_DAY):
+            return fail(429, "The demo has checked all the ads it can today. Come back tomorrow.")
+        check_id = uuid.uuid4().hex[:12]
+        with rooms.batch_upload(force=True) as batch:
+            for k, photo in enumerate(photos):
+                batch.put_file(photo.file, f"/{AD_CHECKS}/{check_id}/photo-{k}{Path(photo.filename or '').suffix.lower()}")
+        record = {"id": check_id, "room": request_id, "status": "checking", "stage": "starting",
+                  "createdAt": datetime.now(timezone.utc).isoformat()}
+        state[f"adcheck:{check_id}"] = record
+        check_ad_photos.spawn(check_id, request_id)
+        return record
+
+    @api.get("/api/ad-checks/{check_id}")
+    def read_ad_check(check_id: str):
+        record = state.get(f"adcheck:{check_id}") if re.fullmatch(r"[0-9a-f]{12}", check_id) else None
+        return record or fail(404, "That check isn't here any more.")
+
+    @api.get("/api/ad-checks/{check_id}/{name}")
+    def ad_check_picture(check_id: str, name: str):
+        if not re.fullmatch(r"[0-9a-f]{12}", check_id) or not re.fullmatch(r"[0-9a-f]{8}-(ad|lines)\.jpg", name):
+            return fail(404, "No such file.")
+        return stored(f"/{AD_CHECKS}/{check_id}/{name}", "No such file.")
+
+    @api.post("/api/imagine")
+    def imagine(view: UploadFile = File(...), width: int = Form(...), height: int = Form(...)):
+        """See it real: Muse Image turns a view of the rough 3D room into a photo-like picture, keeping the layout. A
+        picture for the feel of the room only: no check and no measurement ever uses it."""
+        import requests
+
+        if not 64 <= width <= 1536 or not 64 <= height <= 1536:
+            return fail(400, "That view is the wrong size.")
+        picture = view.file.read(BIGGEST_PHOTO + 1)
+        if len(picture) > BIGGEST_PHOTO:
+            return fail(413, "That view is too big.")
+        if not _within_today("pictures", PICTURES_A_DAY):
+            return fail(429, "The demo has made all the pictures it can today. Come back tomorrow.")
+        try:
+            answer = requests.post("https://api.meta.ai/v1/images/edits",
+                                   headers={"Authorization": f"Bearer {os.environ['MODEL_API_KEY']}"},
+                                   data={"model": "muse-image-1.0", "prompt": SEE_IT_REAL, "n": "1", "size": f"{width}x{height}"},
+                                   files={"image": ("view.jpg", picture, "image/jpeg")}, timeout=140)
+            answer.raise_for_status()
+            return {"image": answer.json()["data"][0]["b64_json"]}
+        except Exception as error:  # noqa: BLE001 - a sentence the page can show, not a bare 500
+            print("Muse Image didn't answer:", error)
+            return fail(502, "Muse Image couldn't make that picture. Try again.")
 
     @api.get("/api/requests/{request_id}/items")
     @api.get("/api/requests/{request_id}/items.json")
@@ -391,7 +515,7 @@ def web():
     @api.post("/api/requests/{request_id}/rerun")
     def rerun(request_id: str, request: Request):
         record = record_of(request_id)
-        if not record or record["status"] not in ("FAILED", "READY") or not record.get("videoSource"):
+        if not record or record["status"] not in ("FAILED", "READY") or not record.get("videoSource") or record.get("locked"):
             return fail(400, "There's no video to build from yet.")
         if record.get("stage"):
             return fail(409, "This room is still being built. Wait for it to finish.")
@@ -406,6 +530,10 @@ def web():
     def file(request_id: str, name: str):
         if not record_of(request_id) or not SAFE_FILE.fullmatch(name):
             return fail(404, "No such file.")
+        if name == "room.ply":  # the page's light copy of the cloud, once the room has one (pipeline.py)
+            light = stored(f"/{request_id}/room-light.ply", "")
+            if light.status_code == 200:
+                return light
         return stored(f"/{request_id}/{name}", "No such file.")
 
     return api
