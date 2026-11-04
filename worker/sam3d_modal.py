@@ -146,6 +146,7 @@ class Sam3d:
                 colours = np.asarray(mesh.visual.vertex_colors)[:, :3].astype(np.uint8)
                 results.append({
                     "vertices": in_camera.astype(np.float32).tobytes(),
+                    "canonical": local.astype(np.float32).tobytes(),  # its own axes, z up, as the local runner keeps
                     "faces": np.asarray(mesh.faces, dtype=np.int32).tobytes(),
                     "colours": colours.tobytes(),
                     "rotation": output["rotation"].detach().cpu().numpy().tolist(),

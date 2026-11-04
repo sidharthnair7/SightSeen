@@ -22,7 +22,8 @@ export default function Film({ token }: { token: string }) {
     setError(null)
     setProgress(0)
     try {
-      await uploadVideo(`${API_BASE}/api/film/${token}/video${live ? '?live=true' : ''}`, file, setProgress)
+      await uploadVideo(`${API_BASE}/api/film/${token}/video${live ? '?live=true' : ''}`, file, setProgress, () =>
+        api.film(token).then(film => film.building === true))
       setSent(true)
     } catch (e) {
       setError((e as Error).message)

@@ -6,7 +6,8 @@ export type Spot = { position: THREE.Vector3; quaternion: THREE.Quaternion }
 
 const LOOK_ACROSS = THREE.MathUtils.degToRad(30) // how far the view turns from where the phone looked, either way
 const LOOK_UP = THREE.MathUtils.degToRad(20) // and up or down
-const STEP_MS = 450 // a glide from one spot to the next
+// A glide from one spot to the next; a straight cut for anyone who's asked for less motion
+const STEP_MS = typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches ? 1 : 450
 
 export type Spots = {
   count: number

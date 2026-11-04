@@ -31,4 +31,6 @@ export interface RoomRequest {
 export interface FilmView {
   label: string
   videoReceived: boolean
+  /** The hosted pipeline: a video is being built into a room right now */
+  building?: boolean
 }

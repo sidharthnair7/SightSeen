@@ -110,7 +110,7 @@ export default function Issues({ base, open, onClose, onReport, room }: {
     const show = (m2: number) => (unit === 'ft2' ? `${Math.round(m2 * FT2_PER_M2)} ft²` : `${m2.toFixed(1)} m²`)
     if (room.tolerance > 0.2) {
       // Flag less and be right: a size this unsure can't call the ad wrong, or right
-      sizeVerdict = { tone: 'warn', text: `Can't judge it yet: the room measures ${show(area)}, but only to ± ${Math.round(room.tolerance * 100)}% until one length is measured with a tape (the room's width, or the desk's height). Then this check is to about ± 4%.` }
+      sizeVerdict = { tone: 'warn', text: `Can't judge it yet: the room measures ${show(area)}, but only to ± ${Math.round(room.tolerance * 100)}% until one length is measured with a tape (the room's width, or the desk's height). Then this check is to about ± 10%.` }
     } else if (claimM2 > area + margin) {
       sizeVerdict = { tone: 'warn', text: `The ad says ${show(claimM2)}; the room measures ${show(area)} (± ${show(margin)}), ${Math.round((1 - area / claimM2) * 100)}% smaller than claimed. Ask the landlord which room the size is for, or measure it together on a call. (An ad's size sometimes means the whole unit.)` }
     } else if (claimM2 < area - margin) {
@@ -122,7 +122,7 @@ export default function Issues({ base, open, onClose, onReport, room }: {
 
   const BadgeIcon = badge?.level === 'live' ? BadgeCheck : badge?.level === 'unknown' ? CircleHelp : ShieldAlert
   return (
-    <div className="absolute right-3 top-3 z-10 max-h-[calc(100%-4.5rem)] w-96 overflow-y-auto rounded-xl bg-white/95 p-4 text-sm text-slate-800 shadow-lg">
+    <div className="absolute right-3 top-3 z-20 max-h-[calc(100%-1.5rem)] w-[min(24rem,calc(100%-1.5rem))] overflow-y-auto overscroll-contain rounded-xl bg-white/95 p-4 text-sm text-slate-800 shadow-lg">
       <div className="flex items-center justify-between">
         <p className="inline-flex items-center gap-1.5 font-medium text-slate-900">
           <AlertTriangle size={16} /> Issues
@@ -147,7 +147,7 @@ export default function Issues({ base, open, onClose, onReport, room }: {
         <p className="mt-1 text-xs text-slate-600">
           Muse Spark looked through all {report.framesChecked ?? 'the'} frames, as small pictures, for damage (mould,
           water stains, cracks, holes, peeling paint, broken fixtures, carpet, pests)
-          {report.damageListed ? ` and listed ${report.damageListed}; none passed the gate.` : ' and listed none, so the gate had nothing to check.'}
+          {report.damageListed ? ` and listed ${report.damageListed}; none passed the checks below.` : ' and listed none, so there was nothing to check.'}
           {' '}Small marks can hide at that size: ask for close-ups of anything you want to be sure of.
         </p>
       )}
@@ -162,7 +162,7 @@ export default function Issues({ base, open, onClose, onReport, room }: {
           </div>
           {flag.gate && (
             <p className="mt-1 text-[11px] text-red-800">
-              Passed the gate: outlined in {flag.gate.frames} frames, {flag.gate.viewsApartCm} cm apart and{' '}
+              Passed the checks: outlined in {flag.gate.frames} frames, {flag.gate.viewsApartCm} cm apart and{' '}
               {flag.gate.viewsTurnDeg}° round, landing within {flag.gate.sameSpotCm} cm of each other.
             </p>
           )}
@@ -171,7 +171,7 @@ export default function Issues({ base, open, onClose, onReport, room }: {
       ))}
       {damageNotShown.length > 0 && (
         <details className="mt-2 text-xs text-slate-600">
-          <summary className="cursor-pointer">{damageNotShown.length} possible problem(s) not shown: they failed the gate</summary>
+          <summary className="cursor-pointer">{damageNotShown.length} possible problem(s) not shown: they failed the checks</summary>
           <ul className="mt-1 list-disc pl-4">
             {damageNotShown.map(d => <li key={d.name}>{sentence(d.name)}: {d.failed}</li>)}
           </ul>
@@ -179,7 +179,7 @@ export default function Issues({ base, open, onClose, onReport, room }: {
       )}
       {report && (
         <p className="mt-2 text-[11px] text-slate-500">
-          The gate (plain rules on top of the AI): a flag shows only when SAM 3.1 outlines it in at least{' '}
+          The checks (plain rules on top of the AI): a flag shows only when SAM 3.1 outlines it in at least{' '}
           {report.gate.frames} frames, from views at least {report.gate.viewsApartCm} cm apart or{' '}
           {report.gate.viewsTurnDeg}° round, landing within {report.gate.sameSpotCm} cm of each other.
         </p>
@@ -206,7 +206,7 @@ export default function Issues({ base, open, onClose, onReport, room }: {
         <>
           <div className="mt-1 flex gap-2">
             <input value={claim} onChange={event => setClaim(event.target.value)} inputMode="decimal"
-              placeholder="The ad's size" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs" />
+              placeholder="The ad's size" className="w-full rounded-lg border border-slate-300 px-3 py-2 text-base sm:text-xs" />
             <select value={unit} onChange={event => setUnit(event.target.value as 'm2' | 'ft2')}
               className="rounded-lg border border-slate-300 px-2 text-xs">
               <option value="ft2">ft²</option>
@@ -220,7 +220,7 @@ export default function Issues({ base, open, onClose, onReport, room }: {
           )}
           <p className="mt-1 text-[11px] text-slate-500">
             Measured floor: {room.width.toFixed(2)} × {room.length.toFixed(2)} m ({(room.width * room.length).toFixed(1)} m²,
-            {' '}{Math.round(room.width * room.length * FT2_PER_M2)} ft²); scale {room.source}.
+            {' '}{Math.round(room.width * room.length * FT2_PER_M2)} ft²); its size is {room.source}.
           </p>
         </>
       ) : (

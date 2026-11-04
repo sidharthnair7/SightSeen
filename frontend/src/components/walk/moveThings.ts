@@ -36,7 +36,7 @@ export type Movable = {
   turn: (degrees: number) => void
   /** Where a new thing of this size and turn can stand: the free floor nearest the room's middle, clear of every
    * thing standing on the floor and inside the walls (its middle, in the room), or null when nowhere is free. */
-  freeSpot: (size: number[], yawDegrees: number) => number[] | null
+  freeSpot: (size: number[], yawDegrees: number, avoid?: { x: number; z: number; reach: number } | null) => number[] | null
   dispose: () => void
 }
 
@@ -219,6 +219,7 @@ export function makeMovable(
         piece.object.position.copy(home)
         piece.object.rotation.y = turnHome
       }
+      select(null)
       refresh()
     },
     add: addPiece,
@@ -237,7 +238,7 @@ export function makeMovable(
       changed(selected.name, fitOf(selected))
       refresh()
     },
-    freeSpot: (size, yawDegrees) => {
+    freeSpot: (size, yawDegrees, avoid) => {
       if (!shell) return null
       const f = halves(size[0], size[2], -THREE.MathUtils.degToRad(yawDegrees))
       const blocks = others(null).map(other => footprint(other))
@@ -248,6 +249,10 @@ export function makeMovable(
         for (let z = -limitZ; z <= limitZ; z += SPOT_STEP) {
           const far = Math.hypot(x, z)
           if (best && far >= best.far) continue
+          if (avoid) {  // not in the face of whoever stands there (the room's opening view)
+            const at = middle.clone().addScaledVector(across, x).addScaledVector(along, z)
+            if (Math.hypot(at.x - avoid.x, at.z - avoid.z) < avoid.reach) continue
+          }
           const clear = blocks.every(g => Math.abs(x - g.x) >= f.hx + g.hx + SPOT_MARGIN || Math.abs(z - g.z) >= f.hz + g.hz + SPOT_MARGIN)
           if (clear) best = { x, z, far }
         }

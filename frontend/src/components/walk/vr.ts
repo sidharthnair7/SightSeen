@@ -101,7 +101,7 @@ export function makeVr(renderer: THREE.WebGLRenderer, scene: THREE.Scene, option
     const { map, aspect } = textCard([`${metres.toFixed(2)} m`,
       assumed.some(Boolean) ? "the ceiling's height is assumed" : `${Math.round(metres * 100)} cm`])
     const label = new THREE.Sprite(new THREE.SpriteMaterial({ map, depthTest: false }))
-    const tall = 0.12 / scale // 12 cm tall, whatever the room's units
+    const tall = 0.16 / scale // 16 cm tall, whatever the room's units: readable from across the room
     label.scale.set(tall * aspect, tall, 1)
     label.position.copy(points[0]).add(points[1]).multiplyScalar(0.5).addScaledVector(up, 0.08 / scale)
     label.renderOrder = 21

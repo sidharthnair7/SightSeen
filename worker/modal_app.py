@@ -141,30 +141,76 @@ def set_room_scale(request_id: str, units: float, metres: float) -> dict:
     try:
         result = room_scale.set_measured(Path("/rooms") / request_id, units, metres)
     except ValueError as error:
+        _update(request_id, scaleState=str(error))
         return {"error": str(error)}
+    except Exception:  # noqa: BLE001 - the page says it didn't work; the log has the rest
+        _update(request_id, scaleState="The room's size couldn't be changed. Try again.")
+        raise
     rooms.commit()
     record = state.get(f"request:{request_id}") or {}
-    _update(request_id, room={**(record.get("room") or {}), "version": int(time.time())})
+    _update(request_id, scaleState="done", room={**(record.get("room") or {}), "version": int(time.time())})
     return result
 
 
+VISITORS = Path("/rooms/visitors")  # a visitor's own things: items/<id>/, each theirs, kept apart from any room
+VISITORS_IN_VOLUME = "/visitors/items"  # the same place, as the web app names it (it doesn't mount the volume)
+
+
+@app.function(image=image, cpu=2, memory=8192, volumes={"/rooms": rooms}, secrets=[_keys()], timeout=1500)
+def build_visitor_item(item_id: str):
+    """worker/items.py on one visitor's photo: SAM 3.1 outlines it, the deployed SAM 3D builds it at its real size."""
+    sys.path.insert(0, "/root/worker")
+    os.environ["SIGHTSEEN_SAM3D_DEPLOYED"] = "1"
+    import items
+
+    def told(meta):  # "done" waits for the commit below: the page fetches the model as soon as it reads it
+        if meta.get("status") != "done":
+            state[f"item:{item_id}"] = meta
+
+    items.on_status = told
+    rooms.reload()
+    try:
+        meta = items.build_item(VISITORS, item_id)
+        rooms.commit()
+    except Exception:  # noqa: BLE001 - the page says so instead of spinning
+        meta = {**(state.get(f"item:{item_id}") or {}), "status": "failed", "why": "The build stopped. Try it again."}
+    state[f"item:{item_id}"] = meta
+
+
+def _within_today(kind: str, most: int) -> bool:
+    """A public link spends GPU credits: a day's rooms and things are capped (a stranger can't drain them)."""
+    key = f"count:{kind}:{datetime.now(timezone.utc).date()}"
+    count = state.get(key) or 0
+    if count >= most:
+        return False
+    state[key] = count + 1
+    return True
+
+
+ROOMS_A_DAY, THINGS_A_DAY = 25, 60
+BIGGEST_VIDEO, BIGGEST_PHOTO = 800 * 1024 * 1024, 25 * 1024 * 1024
+PHOTO_TYPES = (".jpg", ".jpeg", ".png", ".webp")
 SAFE_FILE = re.compile(r"[a-z0-9][a-z0-9.-]*\.(json|png|jpg|ply)")
 VIDEO_TYPES = (".mp4", ".mov", ".m4v", ".webm", ".mkv")
 
 
-@app.function(image=web_image, volumes={"/rooms": rooms}, timeout=900)
+@app.function(image=web_image, timeout=900)
 @modal.concurrent(max_inputs=40)
 @modal.asgi_app()
 def web():
     """The API the page uses, at the same paths as the Spring Boot server's (src/main/java), so the page doesn't
     change; errors come back as {"message": ...} like Spring's. Plain handlers: FastAPI runs them on threads, and
-    Modal's own calls (the Dict, the volume, starting a GPU) wait."""
-    import shutil
+    Modal's own calls (the Dict, the volume, starting a GPU) wait.
+
+    It reads and writes the rooms volume directly (read_file, batch_upload) and doesn't mount it: other containers
+    write the rooms, so a mounted copy would need reloading, and a reload makes files vanish for a moment for every
+    other request in the container."""
+    import mimetypes
     import uuid
 
-    from fastapi import FastAPI, File, Request, UploadFile
+    from fastapi import FastAPI, File, Form, Request, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.responses import JSONResponse, StreamingResponse
     from pydantic import BaseModel
 
     class Start(BaseModel):
@@ -176,10 +222,26 @@ def web():
 
     api = FastAPI(title="SightSeen hosted")
     api.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-    last_reload = [0.0]
 
     def fail(status, message):
         return JSONResponse({"message": message}, status_code=status)
+
+    def stored(path, missing):
+        """A file from the volume as a response, or `missing` (a sentence) as a 404 if it isn't there."""
+        try:
+            chunks = rooms.read_file(path)
+            first = next(chunks, b"")
+        except (FileNotFoundError, modal.exception.NotFoundError):
+            return fail(404, missing)
+        except Exception:  # noqa: BLE001 - a hiccup in the volume: an answer the page can read, not a bare 500
+            return fail(503, "That file couldn't be read just now. Try again.")
+
+        def rest():
+            yield first
+            yield from chunks
+
+        kind = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        return StreamingResponse(rest(), media_type=kind, headers={"Cache-Control": "no-cache"})
 
     def base_of(request):
         return str(request.base_url).rstrip("/").replace("http://", "https://")
@@ -194,25 +256,29 @@ def web():
         return {"id": record["id"], "label": record["label"], "status": record["status"], "stage": record.get("stage"),
                 "landlordPath": f"/film/{record['token']}", "roomPath": f"/room/{record['id']}",
                 "createdAt": record["createdAt"], "videoSource": record.get("videoSource"), "model": "apache",
-                "room": room, "failureMessage": record.get("failureMessage")}
+                "room": room, "failureMessage": record.get("failureMessage"), "scaleState": record.get("scaleState")}
 
     def receive(request_id, video, source, live):
         """Saves the video next to the room, marks how it came in, and starts the GPU."""
         ext = Path(video.filename or "").suffix.lower()
         if ext not in VIDEO_TYPES:
             return fail(400, "That isn't a video this can read: use an MP4, MOV or WebM.")
-        folder = Path("/rooms") / request_id
-        folder.mkdir(parents=True, exist_ok=True)
-        for old in folder.glob("video.*"):
-            old.unlink()
-        with open(folder / f"video{ext}", "wb") as saved:
-            shutil.copyfileobj(video.file, saved, 8 * 1024 * 1024)
-        marker = folder / "video-live.json"
-        if live:
-            marker.write_text(json.dumps({"recordedInPage": True, "at": datetime.now(timezone.utc).isoformat()}))
-        elif marker.exists():
-            marker.unlink()
-        rooms.commit()
+        if (video.size or 0) > BIGGEST_VIDEO:
+            return fail(413, "That video is over 800 MB. A slow two-minute walk round the room is plenty.")
+        if not _within_today("rooms", ROOMS_A_DAY):
+            return fail(429, "The demo has built all the rooms it can today. Try the sample room, or come back tomorrow.")
+        # A video replacing an earlier one: that one may be of another type, and may have been filmed live
+        if (record_of(request_id) or {}).get("videoSource"):
+            for old in [f"video{other}" for other in VIDEO_TYPES if other != ext] + ["video-live.json"]:
+                try:
+                    rooms.remove_file(f"/{request_id}/{old}")
+                except Exception:  # noqa: BLE001 - it wasn't there
+                    pass
+        with rooms.batch_upload(force=True) as batch:
+            batch.put_file(video.file, f"/{request_id}/video{ext}")
+            if live:
+                marker = {"recordedInPage": True, "at": datetime.now(timezone.utc).isoformat()}
+                batch.put_file(io.BytesIO(json.dumps(marker).encode()), f"/{request_id}/video-live.json")
         record = _update(request_id, status="VIDEO_RECEIVED", stage="waiting for a GPU", videoSource=source,
                          failureMessage=None)
         reconstruct_room.spawn(request_id)
@@ -253,7 +319,8 @@ def web():
         record = record_of(request_id) if request_id else None
         if not record:
             return fail(404, "This link doesn't lead anywhere. Ask the student for a new one.")
-        return {"label": record["label"], "videoReceived": record["status"] != "WAITING_FOR_VIDEO"}
+        return {"label": record["label"], "videoReceived": record["status"] != "WAITING_FOR_VIDEO",
+                "building": record["status"] in ("VIDEO_RECEIVED", "RECONSTRUCTING")}
 
     @api.post("/api/film/{token}/video")
     def film_upload(token: str, live: bool = False, video: UploadFile = File(...)):
@@ -272,38 +339,74 @@ def web():
             return fail(404, "No request with that link.")
         if not body.units > 0 or not 0.05 <= body.metres <= 20:
             return fail(400, "Give a real length between 5 cm and 20 m.")
-        result = set_room_scale.remote(request_id, body.units, body.metres)
-        return fail(400, result["error"]) if "error" in result else result
+        # It works on after answering: Modal cuts a request off at 150 s. The page checks scaleState.
+        _update(request_id, scaleState="running")
+        set_room_scale.spawn(request_id, body.units, body.metres)
+        return {"pending": True}
+
+    @api.post("/api/items")
+    def add_item(photo: UploadFile = File(...), name: str = Form(...), widthCm: float = Form(...),
+                 scale: float = Form(1.0)):
+        what = " ".join(re.sub(r"[^a-z0-9 ]", " ", name.lower()).split())
+        if not what or len(what) > 40:
+            return fail(400, "Say what it is in a few words: desk, chair, monitor.")
+        if not 5 <= widthCm <= 500:
+            return fail(400, "Its longest side should be between 5 and 500 cm.")
+        if not 0.2 <= scale <= 5:
+            return fail(400, "This room's scale doesn't look right. Reload the page.")
+        ext = Path(photo.filename or "").suffix.lower()
+        if ext not in PHOTO_TYPES:
+            return fail(400, "That isn't a photo this can read: use a JPG or PNG.")
+        if (photo.size or 0) > BIGGEST_PHOTO:
+            return fail(413, "That photo is over 25 MB.")
+        if not _within_today("things", THINGS_A_DAY):
+            return fail(429, "The demo has built all the things it can today. Come back tomorrow.")
+        item_id = uuid.uuid4().hex[:12]
+        upload_name = "upload" + (".jpg" if ext == ".jpeg" else ext)
+        meta = {"id": item_id, "name": what, "widthCm": widthCm, "scale": scale, "photo": upload_name, "status": "queued",
+                "createdAt": datetime.now(timezone.utc).isoformat()}
+        with rooms.batch_upload(force=True) as batch:
+            batch.put_file(photo.file, f"{VISITORS_IN_VOLUME}/{item_id}/{upload_name}")
+            batch.put_file(io.BytesIO(json.dumps(meta).encode()), f"{VISITORS_IN_VOLUME}/{item_id}/item.json")
+        state[f"item:{item_id}"] = meta
+        build_visitor_item.spawn(item_id)
+        return meta
+
+    @api.get("/api/items/{item_id}")
+    def read_item(item_id: str):
+        meta = state.get(f"item:{item_id}") if re.fullmatch(r"[0-9a-f]{12}", item_id) else None
+        return meta or fail(404, "That thing isn't here any more.")
+
+    @api.get("/api/items/{item_id}/item.ply")
+    def item_model(item_id: str):
+        if not re.fullmatch(r"[0-9a-f]{12}", item_id):
+            return fail(404, "That thing isn't built yet.")
+        return stored(f"{VISITORS_IN_VOLUME}/{item_id}/item.ply", "That thing isn't built yet.")
 
     @api.get("/api/requests/{request_id}/items")
     @api.get("/api/requests/{request_id}/items.json")
     def items(request_id: str):
-        return []  # the student's own things are built on SightSeen's own GPU for now, not in the hosted copy
-
-    @api.post("/api/requests/{request_id}/items")
-    def add_item(request_id: str):
-        return fail(400, "Adding your own things isn't in the hosted version yet.")
+        return []  # a visitor's own things are theirs (/api/items): the page remembers which
 
     @api.post("/api/requests/{request_id}/rerun")
-    def rerun(request_id: str):
-        return fail(400, "Building again with another model isn't in the hosted version.")
+    def rerun(request_id: str, request: Request):
+        record = record_of(request_id)
+        if not record or record["status"] not in ("FAILED", "READY") or not record.get("videoSource"):
+            return fail(400, "There's no video to build from yet.")
+        if record.get("stage"):
+            return fail(409, "This room is still being built. Wait for it to finish.")
+        if not _within_today("rooms", ROOMS_A_DAY):
+            return fail(429, "The demo has built all the rooms it can today. Come back tomorrow.")
+        done = _update(request_id, status="VIDEO_RECEIVED", stage="waiting for a GPU", failureMessage=None)
+        reconstruct_room.spawn(request_id)
+        return view(done, base_of(request))
 
     @api.get("/api/requests/{request_id}/{name}")
     @api.get("/api/requests/{request_id}/assets/{name}")
     def file(request_id: str, name: str):
         if not record_of(request_id) or not SAFE_FILE.fullmatch(name):
             return fail(404, "No such file.")
-        path = Path("/rooms") / request_id / name
-        # Another container wrote the room: look again now and then, and whenever a file isn't there yet
-        if not path.exists() or time.time() - last_reload[0] > 5:
-            try:
-                rooms.reload()
-                last_reload[0] = time.time()
-            except Exception:  # noqa: BLE001 - a file still being sent keeps the old view; it's seconds old
-                pass
-        if not path.exists():
-            return fail(404, "No such file.")
-        return FileResponse(path, headers={"Cache-Control": "no-cache"})
+        return stored(f"/{request_id}/{name}", "No such file.")
 
     return api
 

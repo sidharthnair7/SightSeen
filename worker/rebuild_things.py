@@ -677,10 +677,10 @@ def _build_on_modal(out, folder, frames):
                 if "error" in result:
                     summary.append({"thing": thing["slug"], "error": result["error"], "seconds": result["seconds"]})
                     continue
-                vertices = np.frombuffer(result["vertices"], np.float32).reshape(-1, 3)
+                # Its own axes, fitted by place() as on this PC (SAM 3D's own layout made take 4's suitcase 25% too big)
+                vertices = np.frombuffer(result["canonical"], np.float32).reshape(-1, 3)
                 _save_object(folder / thing["slug"], vertices, np.frombuffer(result["faces"], np.int32).reshape(-1, 3),
-                             np.frombuffer(result["colours"], np.uint8).reshape(-1, 3),
-                             {k: result[k] for k in ("rotation", "translation", "scale")})
+                             np.frombuffer(result["colours"], np.uint8).reshape(-1, 3), {"canonical": "z-up"})
                 summary.append({"thing": thing["slug"], "vertices": len(vertices), "seconds": result["seconds"]})
             (folder / f"sam3d-{Path(name).stem}.json").write_text(json.dumps({"runner": "modal", "things": summary},
                                                                               indent=2))
@@ -868,7 +868,7 @@ def _fit_unposed(vertices, triangles, camera, outline, measured, level, lift, re
             moved = placed + spot
             score = _iou(_silhouette(to_camera(moved), triangles, lens, picture), small, hidden)
             if score > best[0]:
-                best = (score, moved, f"TRELLIS, turned {degrees} degrees, x{size * factor:.3f}")
+                best = (score, moved, f"fitted, turned {degrees} degrees, x{size * factor:.3f}")
     score, moved, choice = best
     return to_camera(moved), score, choice
 

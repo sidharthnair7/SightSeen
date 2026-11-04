@@ -3,7 +3,8 @@ your current setup, and its 3D version is an item you can place in the room). In
 longest side across the floor. Out: a 3D model of it at exactly that size, standing on the floor, ready to move.
 
   1. SAM 3.1 (Meta Model API) outlines the thing by its name in the photo (the biggest outline when there are
-     several; its last word alone when the whole name finds nothing: "gaming desk" -> "desk").
+     several; its last word alone when the whole name finds nothing: "gaming desk" -> "desk"; then whatever Muse Spark,
+     looking at the photo, calls it).
   2. SAM 3D Objects (Meta) builds it whole from the photo and the outline, in its own axes, on this PC's card
      (worker/sam3d_local.py in WSL: about a minute, and two more while the model loads); TRELLIS
      (worker/trellis_local.py) when SAM 3D can't.
@@ -25,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from rebuild_things import _mask, _wsl, _write_thing_ply
+from rebuild_things import _mask, _spark, _wsl, _write_thing_ply
 from room_objects import _outline, _records
 from sam_check import load_env
 
@@ -33,6 +34,7 @@ LONGEST = 1024  # pixels: the photo's long side for SAM 3.1 and TRELLIS (TRELLIS
 MIN_SHARE = 0.01  # an outline smaller than this share of the photo is too small to build from
 Z_UP_TO_Y_UP = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])  # (x, y, z) -> (x, z, -y)
 BUILD_LIMIT = 15 * 60  # seconds one model gets in WSL before it's stopped (it takes about 3 minutes)
+on_status = None  # told each new item.json, when something else needs to know straight away (the hosted app)
 
 
 def _status(item_dir, **fields):
@@ -42,6 +44,8 @@ def _status(item_dir, **fields):
     fresh = item_dir / "item.json.new"
     fresh.write_text(json.dumps(meta, indent=2))
     os.replace(fresh, item_dir / "item.json")
+    if on_status:
+        on_status(meta)
     return meta
 
 
@@ -51,18 +55,48 @@ def _plain(text):
     return re.sub(r"/mnt/[a-z]/[^'\"\s]*|/home/[^'\"\s]*", lambda m: m.group(0).rsplit("/", 1)[-1], text)
 
 
+def _names_from_muse(photo, name, key):
+    """When SAM 3.1 finds nothing by the typed name: Muse Spark looks at the photo and says what to ask it for instead."""
+    import cv2
+
+    picture = cv2.imencode(".jpg", cv2.imread(str(photo)), [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
+    answer = _spark([picture], f"Someone photographed their {name}. Give up to 3 plain names an object detector could "
+                               f"use to find it in this photo, one per line, 1 to 3 words each, nothing else. If it "
+                               f"isn't clear, name the biggest thing in the photo.", key)
+    names = [" ".join(re.sub(r"[^a-z0-9 ]", " ", line.lower()).split()) for line in answer.splitlines()]
+    return [n for n in names if n][:3]
+
+
 def _outline_thing(photo, name, key):
-    """The biggest SAM 3.1 outline of `name` in the photo (trying the name's last word when the whole name finds
-    nothing), as a picture-sized True/False mask, or None."""
+    """The biggest SAM 3.1 outline of `name` in the photo, as a picture-sized True/False mask, and the words that found
+    it: the whole name, then its last word, then what Muse Spark calls it. (None, None) when nothing does."""
     from PIL import Image
 
     width, height = Image.open(photo).size
-    for phrase in dict.fromkeys([name, name.split()[-1]]):
-        masks = [_mask(record, height, width) for record in _records(_outline(photo, phrase, key))]
-        masks = [m for m in masks if m.mean() >= MIN_SHARE]
-        if masks:
-            return max(masks, key=lambda m: m.sum()), phrase
-    return None, None
+
+    def biggest(phrases):
+        for phrase in phrases:
+            masks = [_mask(record, height, width) for record in _records(_outline(photo, phrase, key))]
+            masks = [m for m in masks if m.mean() >= MIN_SHARE]
+            if masks:
+                return max(masks, key=lambda m: m.sum()), phrase
+        return None, None
+
+    first = list(dict.fromkeys([name, name.split()[-1]]))
+    found = biggest(first)
+    return found if found[0] is not None else biggest([n for n in _names_from_muse(photo, name, key) if n not in first])
+
+
+def _build_deployed(photo, outline):
+    """SAM 3D on the deployed sightseen-sam3d app (the hosted pipeline): vertices in its own axes (z up), faces, colours."""
+    import modal
+
+    result = modal.Cls.from_name("sightseen-sam3d", "Sam3d")().build.remote(
+        Path(photo).read_bytes(), [Path(outline).read_bytes()], None, 42)[0]
+    if "error" in result:
+        raise RuntimeError(f"SAM 3D couldn't build it: {result['error']}")
+    return (np.frombuffer(result["canonical"], np.float32).reshape(-1, 3).astype(np.float64),
+            np.frombuffer(result["faces"], np.int32).reshape(-1, 3), np.frombuffer(result["colours"], np.uint8).reshape(-1, 3))
 
 
 def _build(item_dir, photo, outline, runner):
@@ -114,23 +148,27 @@ def build_item(request_dir, item_id):
         _status(item_dir, status="outlining", why=None)
         outline, phrase = _outline_thing(photo, meta["name"], key)
         if outline is None:
-            raise RuntimeError(f"SAM 3.1 couldn't find a {meta['name']} in the photo. Try a plainer name (desk, chair, "
-                               f"monitor) or a photo where it fills more of the picture.")
+            raise RuntimeError(f"Couldn't find the {meta['name']} in the picture. Try one where it fills more of the "
+                               f"frame, with nothing in front of it.")
         Image.fromarray(outline.astype(np.uint8) * 255).save(item_dir / "outline.png")
 
         _status(item_dir, status="building", outlinedAs=phrase)
-        try:
-            vertices, faces, colours = _build(item_dir, photo, item_dir / "outline.png", "sam3d_local.py")
-            built_by = "SAM 3D Objects"
-        except RuntimeError as error:
-            _status(item_dir, status="building", sam3dError=str(error)[:200])
-            vertices, faces, colours = _build(item_dir, photo, item_dir / "outline.png", "trellis_local.py")
-            built_by = "TRELLIS"
+        built_by = "SAM 3D Objects"
+        if os.environ.get("SIGHTSEEN_SAM3D_DEPLOYED") == "1":
+            vertices, faces, colours = _build_deployed(photo, item_dir / "outline.png")
+        else:
+            try:
+                vertices, faces, colours = _build(item_dir, photo, item_dir / "outline.png", "sam3d_local.py")
+            except RuntimeError as error:
+                _status(item_dir, status="building", sam3dError=str(error)[:200])
+                vertices, faces, colours = _build(item_dir, photo, item_dir / "outline.png", "trellis_local.py")
+                built_by = "TRELLIS"
 
         # Stood up, on the floor, at its typed width in the room's own units
         points = vertices @ Z_UP_TO_Y_UP.T
         frame_file = request_dir / "room-frame.json"
         scale = (json.loads(frame_file.read_text()).get("scale") or 1.0) if frame_file.exists() else 1.0
+        scale = meta.get("scale") or scale  # a hosted visitor's thing says which room's scale it's for
         across = np.ptp(points[:, [0, 2]], axis=0)
         factor = (meta["widthCm"] / 100 / scale) / max(float(across.max()), 1e-6)
         points = points * factor

@@ -74,6 +74,7 @@ def export(request_id, target="site", api=""):
     # 2. The room's details, without the landlord's upload link (a static copy can't take a video anyway)
     request = json.loads((data / "request.json").read_text())
     request.pop("landlordPath", None)
+    request["label"] = "A sample room"  # what a visitor reads, not the filming take's name
     (room / "request.json").write_text(json.dumps(request))
 
     # 3. Its files where the viewer asks for them; the rebuilt things thinned

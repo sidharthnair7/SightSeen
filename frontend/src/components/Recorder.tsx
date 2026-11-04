@@ -6,7 +6,7 @@ import { beforeFilming, coachSteps } from '../instructions'
 // take 3's fast turn ran about 39 a second, against about 20 for the rest, and COLMAP couldn't place it
 const TOO_FAST = 30
 const LONGEST = 180 // seconds: the recording stops itself here, so a forgotten phone doesn't fill the upload
-const BITRATE = 16_000_000 // about 120 MB for two minutes: plenty of detail at 1080p
+const BITRATE = 8_000_000 // about 120 MB for two minutes: plenty of detail at 1080p
 
 type Stage = 'ready' | 'recording' | 'review' | 'unsupported' | 'error'
 

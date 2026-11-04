@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { api } from '../api'
+import { STATIC_ROOM, api } from '../api'
 import CopyLink from '../components/CopyLink'
 import type { RoomRequest } from '../types'
 
@@ -26,10 +26,16 @@ export default function Home() {
   return (
     <main className="mx-auto max-w-xl px-4 py-12">
       <h1 className="text-3xl font-semibold tracking-tight">SightSeen</h1>
+      <p className="mt-2 text-lg text-slate-700">See the room before you sign.</p>
       <p className="mt-2 text-slate-600">
-        See the room before you sign. Send the landlord one link, and their video becomes a 3D room you can look
-        around and measure.
+        Send the landlord one link. Their video becomes a 3D room at its real size: walk it, measure it, see if your
+        things fit, check it for red flags, and step inside on a Meta Quest.
       </p>
+      {STATIC_ROOM && (
+        <p className="mt-3 text-sm">
+          <a href="/" className="font-medium text-teal-700 underline">Or look round a sample room first</a>
+        </p>
+      )}
 
       {!request ? (
         <form onSubmit={start} className="mt-8 space-y-3">
@@ -45,7 +51,7 @@ export default function Home() {
           />
           <button
             disabled={busy}
-            className="rounded-lg bg-teal-700 px-4 py-2.5 font-medium text-white hover:bg-teal-600 disabled:opacity-60"
+            className="rounded-lg bg-teal-700 px-4 py-2.5 font-medium text-white hover:bg-teal-600 disabled:opacity-60 transition-[scale,background-color] duration-150 ease-out enabled:active:scale-[0.96] motion-reduce:transition-none motion-reduce:enabled:active:scale-100"
           >
             {busy ? 'Starting...' : 'Start a request'}
           </button>

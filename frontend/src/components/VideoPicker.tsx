@@ -10,7 +10,7 @@ export default function VideoPicker({ label, progress, onPick }: {
     return (
       <div>
         <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-          <div className="h-full bg-teal-600 transition-all" style={{ width: `${Math.round(progress * 100)}%` }} />
+          <div className="h-full bg-teal-600 transition-[width] duration-150 motion-reduce:transition-none" style={{ width: `${Math.round(progress * 100)}%` }} />
         </div>
         <p className="mt-2 text-sm text-slate-600">Sending the video... {Math.round(progress * 100)}%</p>
       </div>

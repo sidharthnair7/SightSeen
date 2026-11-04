@@ -42,13 +42,21 @@ export const api = {
   film: (token: string) => fetch(`${API_BASE}/api/film/${token}`).then(r => read<FilmView>(r)),
 }
 
-/** Sends a video and reports how much has gone (fetch can't report upload progress; XHR can). */
-export function uploadVideo(url: string, file: File, onProgress: (fraction: number) => void): Promise<void> {
+const ARRIVAL_WAIT = 120_000 // milliseconds a fully sent video gets to show up, before it counts as lost
+
+/** Sends a video and reports how much has gone (fetch can't report upload progress; XHR can). `arrived` says whether the
+ * server has it: past 150 s the hosted pipeline's gateway answers with a redirect a browser can't follow across sites,
+ * though the video got there and the room is being built, so a fully sent upload that "fails" gets checked first. */
+export function uploadVideo(url: string, file: File, onProgress: (fraction: number) => void, arrived?: () => Promise<boolean>): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
+    let sent = false
     xhr.open('POST', url)
     xhr.upload.onprogress = e => {
       if (e.lengthComputable) onProgress(e.loaded / e.total)
+    }
+    xhr.upload.onload = () => {
+      sent = true
     }
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) return resolve()
@@ -61,7 +69,19 @@ export function uploadVideo(url: string, file: File, onProgress: (fraction: numb
       }
       reject(new Error(message))
     }
-    xhr.onerror = () => reject(new Error('The upload stopped. Check the connection and try again.'))
+    const stopped = () => reject(new Error('The upload stopped. Check the connection and try again.'))
+    xhr.onerror = () => {
+      if (!sent || !arrived) return stopped()
+      const giveUp = Date.now() + ARRIVAL_WAIT
+      const check = () => {
+        arrived().catch(() => false).then(yes => {
+          if (yes) resolve()
+          else if (Date.now() > giveUp) stopped()
+          else window.setTimeout(check, 3000)
+        })
+      }
+      check()
+    }
     const form = new FormData()
     form.append('video', file)
     xhr.send(form)

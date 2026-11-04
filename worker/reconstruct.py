@@ -1098,8 +1098,7 @@ def explain(error):
     if isinstance(error, torch.cuda.OutOfMemoryError):
         if DEVICE == "cuda":
             torch.cuda.empty_cache()
-        return ("The GPU ran out of memory. Lower sightseen.worker.max-frames in application.properties, "
-                "restart Spring Boot and press Try again.")
+        return "The GPU ran out of memory on this video. Try a shorter one: a slow walk round the room, about a minute."
     if isinstance(error, (ValueError, FileNotFoundError)):
         return str(error)
     return f"The 3D step failed: {type(error).__name__}: {error}"

@@ -14,6 +14,8 @@ type RebuiltThings = {
     seenShare: number
     /** Built into the room (a window, a door): drawn, but not one of the things you can move */
     fixed?: boolean
+    /** A hand-made model (worker/stand_ins.py): SAM 3D filled in none of it */
+    made?: string
   }[]
   failed: { name: string; box?: { centre: number[]; size: number[]; yawDegrees: number } | null }[]
 }
@@ -79,7 +81,7 @@ export async function loadRebuilt(
     if (!response) return
     const geometry = loader.parse(await response.arrayBuffer())
     geometry.computeVertexNormals()
-    geometries.push(geometry)
+    if (!thing.made) geometries.push(geometry) // (the ones "Not filmed" can tint: what SAM 3D filled in)
     // Unlit like the walls: the colours are the photo's own light and shade (both sides, for any open seam)
     const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }))
     mesh.name = thing.name
@@ -88,6 +90,11 @@ export async function loadRebuilt(
   }))
   for (const thing of found.failed ?? []) {
     if (!thing.box) continue
+    // A grey box only where it says something true: not clutter whose measured size is a guess (take 4's "sock" came
+    // out 71 cm tall), and not hanging in the air
+    const across = Math.max(Math.abs(thing.box.size[0]), Math.abs(thing.box.size[2])) * scale()
+    const bottom = (thing.box.centre[1] - Math.abs(thing.box.size[1]) / 2) * scale()
+    if (across < 0.4 || bottom > 1.5) continue
     const { centre, yawDegrees } = thing.box
     // (a box measured below the floor came out with a negative height: a flat thing lying on it)
     const size = thing.box.size.map(side => Math.max(Math.abs(side), 0.01))

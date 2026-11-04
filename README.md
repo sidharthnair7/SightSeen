@@ -19,13 +19,16 @@ damage nobody showed them. Rental scams aimed at students work the same way: a c
 2. **The room in 3D, at real size.** MapAnything rebuilds the room in metres from the video. Every measurement says how
    sure it is, and one tape-measured length (typed on the page) sets the whole room's scale.
 3. **Two ways to see it.**
-   - **Real:** Gaussian splats that look like the video. You step between the spots the phone filmed from, so every
-     view looks like the real room.
-   - **Rebuilt:** every piece of furniture found by Muse Spark and SAM 3.1 and rebuilt whole by SAM 3D Objects, so you
-     can walk anywhere and move things around.
-4. **Will my stuff fit?** Photograph your own desk or chair, give its longest side, and SAM 3D builds it at that size.
-   It lands on free floor, and as you drag it, it tells you how much room it has: "It fits: 24 cm to the bed, 31 cm to
-   the nearest wall", or "It runs 8 cm into the desk".
+   - **Real:** Gaussian splats that look like the video. You step between the spots the phone filmed from, because
+     splats only look right near where they were filmed.
+   - **Rebuilt:** the room's things found by Muse Spark and SAM 3.1 and rebuilt whole by SAM 3D Objects, so you can walk
+     anywhere and move things around. Anything big that can't be rebuilt stays a grey box of its measured size. In the
+     sample room, the big built-in pieces (bed, desk, monitors, wardrobe, door, window) are hand-made models, not SAM 3D,
+     to show where this is going; a new room is all automatic.
+4. **Will my stuff fit?** Take a picture of your own desk or chair in the page (or choose a photo) and give its longest
+   side. SAM 3.1 finds it, SAM 3D builds it at that size in about four minutes, and it lands on free floor. As you drag
+   it, it tells you how much room it has: "It fits: 24 cm to the bed, 31 cm to the nearest wall", or "It runs 8 cm into
+   the desk".
 5. **Issues mode: flag less, and be right.** Plain rules sit on top of the AI:
    - **Damage** (mould, stains, cracks, holes) shows only when SAM 3.1 outlines it in at least 2 frames, from views at
      least 20 cm apart or 10° round, landing within 25 cm of each other. Everything that failed the gate is listed
@@ -69,8 +72,9 @@ In the cloud (`worker/modal_app.py`), each thing builds on its own GPU at once.
 
 ## What makes it trustworthy
 
-- **Every size says how sure it is.** "Rough, from 2 wall plates (±40%)" or "checked with a tape measure". Wall plates
-  only change the scale when two or more agree. One tape-measured length beats everything.
+- **Room sizes and measurements say how sure they are.** "Rough, from 2 wall plates (±40%)", "checked with a tape
+  measure", or "give or take 5 cm". Wall plates only change the scale when two or more agree. One tape-measured length
+  beats them.
 - **The gate is plain code.** An AI flag that appears in one frame only, or from one viewpoint seen twice, never
   reaches the student.
 - **Assumptions are labelled.** A ceiling the video never filmed says "assumed". A measurement that reaches it says so.
