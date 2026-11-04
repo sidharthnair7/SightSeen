@@ -37,6 +37,8 @@ export async function fetchModel(folder: string, file: string, light = false): P
 // What the video never saw, when it's shown: tinted towards this colour, half and half
 const NOT_FILMED = new THREE.Color('#a855f7')
 
+const SHOW_FAILED = false // grey boxes for the things SAM 3D couldn't build
+
 let shadowTexture: THREE.Texture | null = null
 
 /** A soft dark patch on the floor under a thing's footprint (its measured size and turn), a few millimetres up so it
@@ -47,18 +49,18 @@ function contactShadow(centre: number[], size: number[], yawDegrees: number) {
     canvas.width = canvas.height = 128
     const paint = canvas.getContext('2d')!
     const gradient = paint.createRadialGradient(64, 64, 2, 64, 64, 64)
-    gradient.addColorStop(0, 'rgba(0, 0, 0, 0.6)')
-    gradient.addColorStop(0.5, 'rgba(0, 0, 0, 0.32)')
+    gradient.addColorStop(0, 'rgba(0, 0, 0, 0.78)')
+    gradient.addColorStop(0.45, 'rgba(0, 0, 0, 0.45)')
     gradient.addColorStop(1, 'rgba(0, 0, 0, 0)')
     paint.fillStyle = gradient
     paint.fillRect(0, 0, 128, 128)
     shadowTexture = new THREE.CanvasTexture(canvas)
   }
   const shadow = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
-    new THREE.MeshBasicMaterial({ map: shadowTexture, transparent: true, depthWrite: false, opacity: 0.85 }))
+    new THREE.MeshBasicMaterial({ map: shadowTexture, transparent: true, depthWrite: false, opacity: 1 }))
   shadow.rotation.order = 'YXZ'
   shadow.rotation.set(-Math.PI / 2, -THREE.MathUtils.degToRad(yawDegrees), 0)
-  shadow.scale.set(Math.abs(size[0]) * 1.3 + 0.12, Math.abs(size[2]) * 1.3 + 0.12, 1)
+  shadow.scale.set(Math.abs(size[0]) * 1.45 + 0.16, Math.abs(size[2]) * 1.45 + 0.16, 1)
   shadow.position.set(centre[0], 0.005, centre[2])
   shadow.renderOrder = 1
   shadow.name = 'contact shadow'
@@ -122,7 +124,9 @@ export async function loadRebuilt(
     group.add(mesh)
     ;(thing.fixed ? fixed : pieces).push({ ...thing, object: mesh })
   }))
-  for (const thing of found.failed ?? []) {
+  // Things SAM 3D couldn't build used to stand in as grey boxes; they read as broken, so they're left out now (the
+  // owner's call, Nov 4). The list stays in room-things.json.
+  for (const thing of SHOW_FAILED ? found.failed ?? [] : []) {
     if (!thing.box) continue
     // A grey box only where it says something true: not clutter whose measured size is a guess (take 4's "sock" came
     // out 71 cm tall), and not hanging in the air

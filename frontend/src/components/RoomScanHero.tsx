@@ -11,6 +11,25 @@ import ShinyText from './ShinyText'
  * The file (worker-made, public/hero/room-scan.bin): "SSN1", point count, the box's size (x, y, z in metres), the
  * positions' extent, then int16 positions over +-extent, then uint8 colours.
  */
+/** A soft shadow on the page under the room, a little wider than its floor, so it sits rather than floats. */
+function floorShadow(box: THREE.Vector3) {
+  const canvas = document.createElement('canvas')
+  canvas.width = canvas.height = 128
+  const paint = canvas.getContext('2d')!
+  const gradient = paint.createRadialGradient(64, 64, 4, 64, 64, 64)
+  gradient.addColorStop(0, 'rgba(15, 31, 56, 0.3)')
+  gradient.addColorStop(0.6, 'rgba(15, 31, 56, 0.12)')
+  gradient.addColorStop(1, 'rgba(15, 31, 56, 0)')
+  paint.fillStyle = gradient
+  paint.fillRect(0, 0, 128, 128)
+  const shadow = new THREE.Mesh(new THREE.PlaneGeometry(box.x * 1.55, box.z * 1.55),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true, depthWrite: false }))
+  shadow.rotation.x = -Math.PI / 2
+  shadow.position.y = -0.02
+  shadow.renderOrder = -1
+  return shadow
+}
+
 export default function RoomScanHero({ src, className = '' }: { src: string; className?: string }) {
   const mount = useRef<HTMLDivElement>(null)
   const tags = useRef<(HTMLSpanElement | null)[]>([])
@@ -28,7 +47,7 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
       setState('failed')
       return
     }
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5))
     renderer.setClearColor(0x000000, 0)
     const canvas = renderer.domElement
     canvas.style.cssText = 'display:block;width:100%;height:100%;cursor:grab;touch-action:pan-y'
@@ -42,6 +61,7 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
     let material: THREE.ShaderMaterial | null = null
     let geometry: THREE.BufferGeometry | null = null
     let lines: THREE.LineSegments | null = null
+    const surfaces: THREE.MeshBasicMaterial[] = [] // the floor and far walls behind the points
     let disposed = false
     let raf = 0
     let visible = false
@@ -63,7 +83,10 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
       const span = Math.hypot(box.x, box.z) * 0.56
       const half = THREE.MathUtils.degToRad(camera.fov / 2)
       radius = span / Math.tan(half) / Math.min(1, camera.aspect * 1.05)
-      if (material) material.uniforms.uPixel.value = renderer.getPixelRatio() * height / (2 * Math.tan(half))
+      if (material) {
+        material.uniforms.uPixel.value = renderer.getPixelRatio() * height / (2 * Math.tan(half))
+        material.uniforms.uFog.value = [radius - 2.5, radius + 3.5]
+      }
       wake()
     }
 
@@ -90,6 +113,8 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
       if (material) {
         const scan = still ? 1 : Math.max(0, Math.min(1, (now - scanStart) / 2600))
         material.uniforms.uScan.value = 1 - Math.pow(1 - scan, 2.2)
+        const solid = THREE.MathUtils.smoothstep(scan, 0.55, 1)
+        surfaces.forEach(skin => (skin.opacity = solid))
         if (scan >= 1 && state !== 'ready') setState('ready')
       }
       renderer.render(scene, camera)
@@ -184,7 +209,9 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
           transparent: true,
           uniforms: {
             uScan: { value: 0 },
-            uSize: { value: 0.03 },
+            uSize: { value: 0.032 },
+            uFog: { value: [8, 14] },
+            uPaper: { value: new THREE.Color('#f4f6f9') },
             uPixel: { value: 600 },
             uBox: { value: box },
             uTape: { value: new THREE.Color('#ffd23f') },
@@ -192,7 +219,8 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
           vertexShader: /* glsl */ `
             attribute vec3 tint;
             uniform float uScan, uSize, uPixel;
-            uniform vec3 uBox, uTape;
+            uniform vec2 uFog;
+            uniform vec3 uBox, uTape, uPaper;
             varying vec3 vColour;
             varying float vShown;
             float hash(vec3 p) { return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
@@ -206,7 +234,9 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
               vec4 eye = modelViewMatrix * vec4(p, 1.0);
               gl_Position = projectionMatrix * eye;
               gl_PointSize = clamp(uSize * uPixel / -eye.z * (1.0 + glow * 1.6), 1.0, 12.0);
-              vColour = mix(tint, uTape, clamp(glow * 1.3, 0.0, 1.0));
+              // the far side fades a little into the paper, so the room reads in depth
+              vec3 base = mix(tint, uPaper, smoothstep(uFog.x, uFog.y, -eye.z) * 0.32);
+              vColour = mix(base, uTape, clamp(glow * 1.3, 0.0, 1.0));
               vShown = shown;
             }`,
           fragmentShader: /* glsl */ `
@@ -220,6 +250,39 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
         })
         scene.add(new THREE.Points(geometry, material))
         target.set(0, box.y * 0.16, 0)
+
+        // Behind the points: a solid floor and the two far walls in the room's own colours (the average of the points
+        // on each), so what the video never saw reads as floor and wall rather than holes onto the page. They face into
+        // the room, so turned round, the near side never blocks the view; they fade in as the scan finishes.
+        let top = 0
+        for (let i = 1; i < count * 3; i += 3) top = Math.max(top, positions[i])
+        const average = (on: (px: number, py: number, pz: number) => boolean) => {
+          let r = 0, g = 0, b = 0, n = 0
+          for (let i = 0; i < count; i++) {
+            if (!on(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2])) continue
+            r += colours[i * 3]
+            g += colours[i * 3 + 1]
+            b += colours[i * 3 + 2]
+            n++
+          }
+          return n ? new THREE.Color().setRGB(r / n / 255, g / n / 255, b / n / 255, THREE.SRGBColorSpace) : new THREE.Color('#d9dde3')
+        }
+        const hx = box.x / 2
+        const hz = box.z / 2
+        const surface = (width: number, height: number, colour: THREE.Color) => {
+          const skin = new THREE.MeshBasicMaterial({ color: colour, transparent: true, opacity: 0 })
+          surfaces.push(skin)
+          return new THREE.Mesh(new THREE.PlaneGeometry(width, height), skin)
+        }
+        const floor = surface(box.x, box.z, average((_, py) => py < 0.04))
+        floor.rotation.x = -Math.PI / 2
+        floor.position.y = -0.012
+        const right = surface(box.z, top, average(px => px > hx - 0.12))
+        right.rotation.y = -Math.PI / 2
+        right.position.set(hx + 0.015, top / 2, 0)
+        const back = surface(box.x, top, average((_, __, pz) => pz < -hz + 0.12))
+        back.position.set(0, top / 2, -hz - 0.015)
+        scene.add(floor, right, back)
 
         // dimension lines along the floor's two near edges, a little outside the room
         const x = box.x / 2
@@ -243,6 +306,7 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
         lineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(segments, 3))
         lines = new THREE.LineSegments(lineGeometry, new THREE.LineBasicMaterial({ color: '#0f1f38', transparent: true, opacity: 0.75 }))
         scene.add(lines)
+        scene.add(floorShadow(box))
 
         setSize([box.x, box.y, box.z])
         setState(still ? 'ready' : 'scanning')
@@ -273,6 +337,7 @@ export default function RoomScanHero({ src, className = '' }: { src: string; cla
       canvas.removeEventListener('pointerleave', onLeave)
       geometry?.dispose()
       material?.dispose()
+      surfaces.forEach(skin => skin.dispose())
       lines?.geometry.dispose()
       ;(lines?.material as THREE.Material | undefined)?.dispose()
       renderer.dispose()

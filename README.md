@@ -97,7 +97,7 @@ splats and loads lighter models: about 550,000 triangles for the whole room.
 - When an ad's photo is blank or blurry, not enough details line up and it says "can't tell", rather than guessing.
 - A new room's size is rough until someone measures one length with a tape. On the sample, MapAnything alone came out 28% small,
   and wall plates were about as far off, so the page says "rough" and the size check won't judge an ad until there's a tape length.
-- In the sample room, 14 of its 27 things are hand-made models, not SAM 3D (the big built-in pieces like the bed, desk, monitors,
+- In the sample room, 12 of its 25 things are hand-made models, not SAM 3D (the big built-in pieces like the bed, desk, monitors,
   wardrobe, door and window), to show where this is going. A new room is all automatic. The hosted pipeline doesn't train splats
   yet, so a new room has the Rebuilt look only; the sample has Real too.
 - VR hasn't been run on a real headset yet, only in Meta's emulator, so its frame rate on a Quest isn't known.

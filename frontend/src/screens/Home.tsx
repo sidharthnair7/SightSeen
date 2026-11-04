@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Check, X } from 'lucide-react'
 import { FAKE_ROOM, STATIC_ROOM } from '../api'
 import BlurText from '../components/BlurText'
@@ -104,6 +104,16 @@ function VerdictCard() {
 
 export default function Home() {
   const [section, setSection] = useState('#top')
+  const hero = useRef<HTMLElement>(null)
+  const [heroOn, setHeroOn] = useState(true)
+
+  // The threads only draw while the hero is on screen: the rest of the page scrolls without a full-screen WebGL pass
+  useEffect(() => {
+    if (!hero.current) return
+    const watch = new IntersectionObserver(([entry]) => setHeroOn(entry.isIntersecting))
+    watch.observe(hero.current)
+    return () => watch.disconnect()
+  }, [])
 
   // A link to a section (/#scam-checks) lands on it: the page draws after the browser has looked for the anchor
   useEffect(() => {
@@ -130,10 +140,10 @@ export default function Home() {
       <SiteNav items={navItems} activeHref={section} />
       <main id="top" className="relative overflow-x-clip text-ink">
         {/* The hero: Trini's dithered room on the right, threads that lean towards the cursor behind everything */}
-        <section className="relative isolate">
+        <section ref={hero} className="relative isolate">
           <div aria-hidden="true" className="pointer-events-none absolute inset-0 -z-10 [mask-image:linear-gradient(to_bottom,black_55%,transparent)]">
             <Threads color="#0f1f38" accentColor="#ffd23f" amplitude={1.4} distance={0.3} enableMouseInteraction lineCount={46}
-              thickness={0.7} softness={1.2} speed={0.45} brightness={1} opacity={0.42} angle={18} />
+              thickness={0.7} softness={1.2} speed={0.45} brightness={1} opacity={0.42} angle={18} paused={!heroOn} />
           </div>
           <div className="mx-auto grid min-h-[100svh] max-w-7xl items-center gap-12 px-5 pb-16 pt-28 sm:px-8 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
             <div className="max-w-2xl">
@@ -352,7 +362,7 @@ export default function Home() {
         </section>
 
         <footer className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 border-t border-hair px-5 py-8 text-sm text-steel sm:px-8">
-          <p>Built for Meta’s Global AI Developer Hackathon by Sidharth Nair and Trinidad Laguardia.</p>
+          <p>Sidharth Nair and Trinidad Laguardia</p>
           <div className="flex gap-6">
             <a href="/workspace" className="font-semibold text-ink hover:underline">Workspace</a>
             <a href={REPO} className="font-semibold text-ink hover:underline">The code on GitHub</a>

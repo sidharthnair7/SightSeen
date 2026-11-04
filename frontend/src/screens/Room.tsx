@@ -159,7 +159,7 @@ export default function Room({ id }: { id: string }) {
           <p className="mt-1">
             {room.frames} frames from the video, turned into 3D in metres by MapAnything in {room.seconds} s. Muse Spark and SAM 3.1
             found the room’s things, and SAM 3D Objects rebuilt them whole.
-            {sample && !fake && ' In this sample, 14 of its 27 things are hand-made models, not SAM 3D (the big built-in pieces like the bed, desk, monitors, wardrobe, door and window), to show where this is going, and Muse Image continued the blanket where the video never saw it (Not filmed tints that part). In a new room, everything is automatic.'}
+            {sample && !fake && ' In this sample, 12 of its 25 things are hand-made models, not SAM 3D (the big built-in pieces like the bed, desk, monitors, wardrobe, door and window), to show where this is going, and Muse Image continued the blanket where the video never saw it (Not filmed tints that part). In a new room, everything is automatic.'}
           </p>
           <p className="mt-2">
             A new room’s size starts as a rough guess: on this sample, MapAnything alone came out 28% small against a tape. Wall plates
