@@ -199,3 +199,6 @@ if __name__ == "__main__":
     if len(args) not in (1, 2):
         sys.exit("usage: python worker/export_static.py <request id> [<out folder>] [--api <address>] [--fake <request id>]")
     print(json.dumps(export(*args, api=api, fake=fake), indent=2))
+    # Vercel serves files first, and every other path (a room's page) gets the app
+    out = Path(args[1]) if len(args) == 2 and Path(args[1]).is_absolute() else ROOT / (args[1] if len(args) == 2 else "site")
+    (out / "vercel.json").write_text(json.dumps({"rewrites": [{"source": "/(.*)", "destination": "/index.html"}]}, indent=2))

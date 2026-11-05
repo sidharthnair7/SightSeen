@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Check, X } from 'lucide-react'
 import { FAKE_ROOM, STATIC_ROOM } from '../api'
-import BlurText from '../components/BlurText'
 import ClickSpark from '../components/ClickSpark'
 import CountUp from '../components/CountUp'
 import DitherVeil from '../components/DitherVeil'
 import LogoLoop from '../components/LogoLoop'
 import Magnet from '../components/Magnet'
 import Reveal from '../components/Reveal'
-import RoomScanHero from '../components/RoomScanHero'
 import RotatingText from '../components/RotatingText'
 import SiteNav from '../components/SiteNav'
 import Threads from '../components/Threads'
@@ -148,7 +146,7 @@ export default function Home() {
           <div className="mx-auto grid min-h-[100svh] max-w-7xl items-center gap-12 px-5 pb-16 pt-28 sm:px-8 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
             <div className="max-w-2xl">
               <h1 className="font-display text-[clamp(2.7rem,6.1vw,5.1rem)] font-[780] leading-[0.92] text-ink">
-                <BlurText text="See the room before you sign." animateBy="words" direction="bottom" delay={90} trigger="load" />
+                See the room before you sign.
               </h1>
               <Reveal delay={0.45}>
                 <p className="mt-7 max-w-[34rem] text-lg leading-8 text-steel sm:text-xl sm:leading-9">
@@ -261,9 +259,8 @@ export default function Home() {
           <Reveal>
             <h2 className="font-display text-[clamp(2.1rem,4.2vw,3.4rem)] font-[740] leading-[0.98]">One video in. The room, at its real size.</h2>
             <p className="mt-6 max-w-md text-lg leading-8 text-steel">
-              This is a hotel room SightSeen rebuilt from a stock video, live in your browser. Move your cursor over it, or drag to
-              turn it. The tape marks are its measured floor: 5.15 by 4.11 m, from two wall plates, so rough until someone checks one
-              length with a tape.
+              This is a hotel room SightSeen rebuilt from one stock video: every piece of furniture found and rebuilt whole by SAM 3D
+              Objects, set at its measured size, on a floor measured in metres. Walk it, measure it, move things around.
             </p>
             {sampleHref && (
               <a href={sampleHref} className="mt-8 inline-flex min-h-12 items-center rounded-full bg-ink px-6 text-base font-semibold text-white transition-[scale] duration-150 active:scale-[0.96]">
@@ -272,7 +269,10 @@ export default function Home() {
             )}
           </Reveal>
           <Reveal delay={0.15}>
-            <RoomScanHero src="/hero/room-scan.bin" className="aspect-[5/4] w-full lg:aspect-auto lg:h-[min(70vh,40rem)]" />
+            <figure className="overflow-hidden rounded-[1.75rem] bg-white shadow-[0_30px_80px_-30px_rgba(15,31,56,0.45)] ring-1 ring-hair">
+              <video src="/hero/room-walk.mp4" poster="/hero/room-walk.jpg" autoPlay muted loop playsInline preload="metadata"
+                className="block aspect-video w-full object-cover" aria-label="Walking through the rebuilt hotel room in SightSeen" />
+            </figure>
           </Reveal>
         </section>
 

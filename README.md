@@ -4,7 +4,7 @@
 size that a student can walk, measure, fill with their own things, step into in VR, and check for the signs of a rental
 scam.
 
-**[Try it live](https://sightseen6.pages.dev)** · no sign-in · walk a sample room, watch it catch a fake, or start your own
+**[Try it live](https://sightseen-five.vercel.app)** · no sign-in · walk a sample room, watch it catch a fake, or start your own
 
 Built for Meta's Global AI Developer Hackathon by Sidharth Nair and Trinidad Laguardia, with MapAnything, Muse Spark,
 Muse Image, SAM 3.1 and SAM 3D Objects.
@@ -46,6 +46,11 @@ sometimes its real tour. So asking for a video doesn't help if nobody can check 
    or measurement ever uses it.
 6. **Step inside in VR.** In a Meta Quest's browser, Enter VR puts you in the room at its real size, so you can feel how
    tight it is. Walk with the left stick, turn with the right, and point the trigger at two spots to measure in metres.
+
+**Made for Meta Quest and Meta's AI glasses.** The Quest is where a student stands in the room before signing. The glasses
+are the other end: a landlord's tour is just a first-person video, so a landlord wearing Ray-Ban or Oakley Meta glasses can
+film it hands-free while holding up the code. The link takes any phone video today; filming straight from the glasses is
+next, not built yet.
 
 ![See it real: Muse Image paints the rough 3D view as a photo, with everything left where it stands](docs/see-it-real.jpg)
 
@@ -101,32 +106,60 @@ splats and loads lighter models: about 550,000 triangles for the whole room.
   wardrobe, door and window), to show where this is going. A new room is all automatic. The hosted pipeline doesn't train splats
   yet, so a new room has the Rebuilt look only; the sample has Real too.
 - VR hasn't been run on a real headset yet, only in Meta's emulator, so its frame rate on a Quest isn't known.
+- **It was built on a student budget.** We're college students, so we kept GPU time short: a room costs about $2 on Modal,
+  and we ran the pipeline as few times as we could. That's why some of it is rougher than it could be. In the fake-tour
+  example, SAM 3D's rebuilds of the chairs, table, vanity and plant came out broken, so they're left out instead of shown
+  floating, and the hosted pipeline doesn't train splats yet. More GPU time is what would fix most of this: more frames
+  from each video, and more tries at the things that come out wrong.
 
 ## How it works
 
 ```mermaid
-flowchart LR
-    A[Landlord films<br/>through the link] --> B[MapAnything<br/>3D in metres]
-    A --> T[Muse Spark reads the code<br/>plain code compares]
-    B --> C[COLMAP<br/>precise cameras]
-    C --> D[Brush<br/>Gaussian splats]
-    C --> E[Room shell<br/>walls, floor, ceiling]
-    A --> U[Parallax check<br/>real depth]
-    E --> F[Scale check<br/>wall plates or a tape]
-    F --> G[Muse Spark + SAM 3.1<br/>find each thing]
-    G --> H[SAM 3D Objects<br/>rebuild it whole]
-    H --> I[Set in the room<br/>measured size and spot]
-    I --> J[Issues<br/>AI + plain-rules gate]
-    AD[The ad's photos] --> V[SIFT + RANSAC, then Muse Spark<br/>same room?]
-    T --> W((Before you sign))
+flowchart TD
+    subgraph IN["1. What comes in"]
+        A[Landlord films<br/>through the link]
+        AD[The ad's photos]
+    end
+    subgraph BUILD["2. Build the room"]
+        B[MapAnything<br/>3D in metres] --> C[COLMAP<br/>precise cameras]
+        C --> E[Room shell<br/>walls, floor, ceiling]
+        E --> F[Scale check<br/>wall plates or a tape]
+        F --> G[Muse Spark + SAM 3.1<br/>find each thing]
+        G --> H[SAM 3D Objects<br/>rebuild it whole]
+        H --> I[Set in the room<br/>measured size and spot]
+        C --> D[Brush<br/>Gaussian splats]
+    end
+    subgraph CHECK["3. Check it for a scam"]
+        T[Muse Spark reads the code<br/>plain code compares]
+        U[Parallax check<br/>real depth]
+        V[SIFT + RANSAC, then Muse Spark<br/>same room?]
+        J[Issues<br/>AI + plain-rules gate]
+    end
+    subgraph OUT["4. What the student gets"]
+        W((Before you sign))
+        L((Rebuilt look<br/>+ fit check))
+        K((Real look))
+        N((VR at real size))
+        R((Muse Image<br/>See it real))
+    end
+    A --> B
+    A --> T
+    A --> U
+    AD --> V
+    I --> J
+    T --> W
     U --> W
     V --> W
     J --> W
-    D --> K((Real look))
-    I --> L((Rebuilt look<br/>+ fit check))
-    L --> N((VR at real size))
-    L --> R((Muse Image<br/>See it real))
+    I --> L
+    D --> K
+    L --> N
+    L --> R
+    classDef meta fill:#ffd23f,stroke:#0f1f38,color:#0f1f38
+    class B,G,H,T,V,J,R meta
 ```
+
+Read it top to bottom. The yellow steps use Meta's models.
 
 The page is static, on Cloudflare Pages. Rooms are built on [Modal](worker/modal_app.py): a GPU for the 3D step, and each thing on
 its own GPU at once. [`worker/pipeline.py`](worker/pipeline.py) runs everything after the 3D step on its own.
@@ -170,6 +203,31 @@ Keys go in `.env` (see `.env.example`): `MODEL_API_KEY` for the Meta Model API, 
 version deploys with `modal deploy` ([`worker/modal_app.py`](worker/modal_app.py) has the steps), and
 [`worker/export_static.py`](worker/export_static.py) makes the page's static copy.
 
+### Host the hosted app on Vercel
+
+Vercel hosts the Vite frontend; Modal hosts the public API and GPU work. `worker/app.py` is a local GPU helper used by
+Spring Boot, not the public API. The hosted API is `worker/modal_app.py`, which implements the `/api/...` routes used by
+the frontend. Deploying the helper as a Vercel FastAPI service would not provide the Modal GPU, storage, or state that
+the hosted pipeline needs.
+
+1. Deploy the Modal apps using the commands at the top of [`worker/modal_app.py`](worker/modal_app.py): deploy
+   `sam3d_modal.py` first, then `modal_app.py`. Copy the HTTPS URL printed for the `web` app.
+2. In Vercel, import `sidharthnair7/SightSeen`, choose your team, and set **Root Directory** to `frontend`.
+   The Vercel settings are in [`frontend/vercel.json`](frontend/vercel.json): Vite, `npm run build`, output `dist`.
+3. In **Project Settings → Environment Variables**, set `VITE_API_BASE` to the Modal `web` app's HTTPS origin, with
+   no trailing slash (for example, `https://your-modal-web-url.modal.run`). Add it to Production and Preview if both
+   should use the hosted API. This is a public API URL; keep model keys and other secrets on Modal.
+4. Deploy or redeploy the Vercel project. Vite embeds `VITE_API_BASE` at build time. The frontend uses that origin for
+   API requests and room assets; the Modal API already allows browser requests from the Vercel site.
+5. Open the deployment URL and try creating a room and uploading a video. If a request fails, check the browser
+   Network panel and the Modal app logs.
+
+This setup intentionally does not use a Vercel frontend/worker service binding: the `worker` folder is not the public
+API and cannot replace the Modal-backed hosted app. Vercel Services support multiple services within a Vercel project;
+the current hosted backend already runs on Modal. See [Vercel Services](https://vercel.com/docs/services) and
+[external rewrites](https://vercel.com/docs/routing/rewrites) if you later move the API to a web service that supports
+the hosted pipeline's GPU, persistent storage, and state needs.
+
 **Stack:** React + TypeScript + three.js + Spark (splats) + WebXR, Python (FastAPI, Open3D, OpenCV, PyTorch), Modal for the
 cloud GPUs, Spring Boot for running it locally.
 
@@ -184,7 +242,7 @@ AI coding assistants, directed by us.
 - These components in `frontend/src/components` are from React Bits, adapted to SightSeen's look: `PillNav`, `DitherVeil`,
   `ClickSpark`, `ShinyText` (chosen by Trinidad for the landing page), and `Threads`, `BlurText`, `RotatingText`, `CountUp`,
   `TiltedCard`, `Magnet` and `LogoLoop` (the landing page's background, motion and model strip).
-- The landing page's live 3D room (`RoomScanHero.tsx`) is ours: SightSeen's own rebuild of the stock hotel video, as points.
+- The landing page's room clip is a screen recording of SightSeen's own rebuild of the stock hotel video.
 
 **Models:** Muse Spark, Muse Image and SAM 3.1 through the Meta Model API; MapAnything and SAM 3D Objects as open weights.
 

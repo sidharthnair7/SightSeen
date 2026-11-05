@@ -24,7 +24,7 @@ export const STATIC_ROOM: string | undefined = import.meta.env.VITE_STATIC_ROOM
 export const FAKE_ROOM: string | undefined = import.meta.env.VITE_FAKE_ROOM
 /** The hosted pipeline's address (worker/modal_app.py on Modal), when this copy was built with one: every room but the
  * sample is built and served there, and anyone can start their own. Empty: the server this page came from. */
-export const API_BASE: string = import.meta.env.VITE_API_BASE ?? ''
+export const API_BASE: string = (import.meta.env.VITE_API_BASE ?? '').replace(/\/+$/, '')
 export const LIVE = STATIC && API_BASE !== ''
 /** The static copy's own room, whose files sit next to the page. */
 export const isSample = (id: string) => STATIC && (id === STATIC_ROOM || id === FAKE_ROOM)
